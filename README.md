@@ -1,34 +1,94 @@
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/CreatorAris/CreatorAris/dist/github-snake-dark.svg" />
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/CreatorAris/CreatorAris/dist/github-snake.svg" />
+  <img alt="github contribution snake animation" src="https://raw.githubusercontent.com/CreatorAris/CreatorAris/dist/github-snake.svg" />
+</picture>
+
 # Nephele Remote
 
-Nephele Workshop 的移动伴侣端 — 在画画的间隙用手机浏览 Eagle 素材库、查看桌面端 Agent 的进度、远程触发 Pipeline。
+Mobile companion for [Nephele Workshop](https://nephele.arisfusion.com) — an Expo / React Native app that connects to a running desktop session, so the artist can browse Eagle references, watch agent progress, and trigger pipelines from a phone without breaking flow on the desktop.
 
-> **这是配套 App,不能独立使用。** 它通过 WebSocket 连接到正在运行的 Nephele Workshop 桌面端,所有功能依赖桌面端会话。
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Expo](https://img.shields.io/badge/Expo-SDK%2054-000020.svg)](https://expo.dev)
+[![React Native](https://img.shields.io/badge/React%20Native-0.81-61DAFB.svg)](https://reactnative.dev)
+[![Status](https://img.shields.io/badge/status-alpha-orange.svg)](#status)
+[![GitHub stars](https://img.shields.io/github/stars/CreatorAris/nephele-remote.svg)](https://github.com/CreatorAris/nephele-remote/stargazers)
+[![GitHub last commit](https://img.shields.io/github/last-commit/CreatorAris/nephele-remote.svg)](https://github.com/CreatorAris/nephele-remote/commits)
 
-## Stack
+[中文文档](README_ZH.md) · [Nephele Workshop](https://nephele.arisfusion.com)
 
-- Expo (React Native) + TypeScript
-- expo-router file-based routing
-- Tamagui design system
-- @react-native-async-storage/async-storage 存 JWT
-- WebSocket 走 Cloudflare Durable Object 中继到桌面端
+</div>
+
+## What this is
+
+Nephele Remote is the mobile half of the Nephele Workshop ecosystem. It connects to a running desktop session (PySide6 client) over a WebSocket relay hosted on Cloudflare Durable Objects, so the artist can keep drawing on the desktop while triaging Eagle references, watching agent output, or kicking off a pipeline from the phone.
+
+The desktop client tree is closed source; for the auditable subset see [nephele-core-audit](https://github.com/CreatorAris/nephele-core-audit).
+
+## Status
+
+Alpha. Mobile builds are not on App Store / Play Store yet. The bridge protocol and the five screens (Workshop / Gallery / Agent / Pipeline / Profile) are all functional and integrated with the desktop client.
+
+## Architecture
+
+```
+Mobile (Expo + React Native + Tamagui)
+    <-- WebSocket -->
+Cloudflare Durable Object (RemoteRelay, hibernation-safe)
+    <-- WebSocket -->
+Desktop (PySide6 + Python, core/remote_bridge.py)
+    <--> Eagle, Agent, Pipeline, file server
+```
+
+Image transfer:
+
+- **LAN** — direct HTTP from the desktop's `core/file_server.py`, Tailscale-aware (auto-detects `100.x` addresses)
+- **WAN** — thumbnails inline (Pillow 200px JPEG q70 over WebSocket relay), full images via Cloudflare R2 CDN URLs
+
+Auth: email OTP. Mobile clients declare `X-Client-Type: nephele-mobile-v1` to bypass CAPTCHA — this is a public client identifier, not a secret. Defense relies on server-side rate limiting (per-IP RPM/RPH/RPD, per-email cooldown and daily cap).
 
 ## Screens
 
-- **Workshop** — 连接状态 + 积分 + 快捷动作
-- **Gallery (Eagle)** — 文件夹浏览 + 瀑布流缩略图 + 全屏预览(支持双指缩放)
-- **Agent** — 流式对话 + 工具调用展示 + 中断
-- **Pipeline** — 实时步骤进度 + 启动控制
-- **Profile** — 邮箱登录(OTP)+ 注销
+| Screen | Contents |
+|:---|:---|
+| Workshop | Connection status, credit balance, quick actions |
+| Gallery | Eagle folder tree + masonry waterfall + pinch-to-zoom lightbox |
+| Agent | Streaming chat, tool call display, abort |
+| Pipeline | Real-time step progress, start control |
+| Profile | Email OTP login, logout |
 
-## Dev
+## Repository layout
+
+| Path | Contents |
+|:---|:---|
+| `app/` | expo-router file-based routes (tabs, auth, workshop) |
+| `components/` | Shared UI primitives (Tamagui-based) |
+| `utils/` | Auth, WebSocket client, theme tokens |
+| `assets/` | App icons, splash |
+
+## Develop
 
 ```bash
 npm install
 npx expo start
 ```
 
-需要本地运行的桌面端来测真实数据流。
+You need a running Nephele Workshop desktop client (logged in to the same account) for the bridge to deliver real data.
+
+## Reporting issues
+
+Bugs in the mobile client — file an issue here. PRs welcome; this repository is the source of truth for the published mobile binary.
+
+Feature requests for the broader Nephele Workshop product (the desktop client itself) — the client tree is closed source, so file them via the contact address on the [website](https://nephele.arisfusion.com), not here.
 
 ## License
 
-MIT
+MIT, see [LICENSE](LICENSE). Free to fork, audit, or repackage.
+
+## Related repositories
+
+- [nephele-wisp](https://github.com/CreatorAris/nephele-wisp) — browser extension companion (Chrome / Edge MV3 + Native Messaging Host)
+- [nephele-core-audit](https://github.com/CreatorAris/nephele-core-audit) — auditable subset of the Nephele Workshop client (rights / packer / validator)
+- [nephele-verify](https://github.com/CreatorAris/nephele-verify) — independent verification page for `.nep` evidence files
