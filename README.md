@@ -6,7 +6,7 @@
   <img alt="github contribution snake animation" src="https://raw.githubusercontent.com/CreatorAris/CreatorAris/dist/github-snake.svg" />
 </picture>
 
-# Nephele Remote
+# Nephele Aura
 
 Mobile companion for [Nephele Workshop](https://nephele.arisfusion.com) — an Expo / React Native app that connects to a running desktop session, so the artist can browse Eagle references, watch agent progress, and trigger pipelines from a phone without breaking flow on the desktop.
 
@@ -14,8 +14,8 @@ Mobile companion for [Nephele Workshop](https://nephele.arisfusion.com) — an E
 [![Expo](https://img.shields.io/badge/Expo-SDK%2054-000020.svg)](https://expo.dev)
 [![React Native](https://img.shields.io/badge/React%20Native-0.81-61DAFB.svg)](https://reactnative.dev)
 [![Status](https://img.shields.io/badge/status-alpha-orange.svg)](#status)
-[![GitHub stars](https://img.shields.io/github/stars/CreatorAris/nephele-remote.svg)](https://github.com/CreatorAris/nephele-remote/stargazers)
-[![GitHub last commit](https://img.shields.io/github/last-commit/CreatorAris/nephele-remote.svg)](https://github.com/CreatorAris/nephele-remote/commits)
+[![GitHub stars](https://img.shields.io/github/stars/CreatorAris/nephele-aura.svg)](https://github.com/CreatorAris/nephele-aura/stargazers)
+[![GitHub last commit](https://img.shields.io/github/last-commit/CreatorAris/nephele-aura.svg)](https://github.com/CreatorAris/nephele-aura/commits)
 
 [中文文档](README_ZH.md) · [Nephele Workshop](https://nephele.arisfusion.com)
 
@@ -23,7 +23,7 @@ Mobile companion for [Nephele Workshop](https://nephele.arisfusion.com) — an E
 
 ## What this is
 
-Nephele Remote is the mobile half of the Nephele Workshop ecosystem. It connects to a running desktop session (PySide6 client) over a WebSocket relay hosted on Cloudflare Durable Objects, so the artist can keep drawing on the desktop while triaging Eagle references, watching agent output, or kicking off a pipeline from the phone.
+Nephele Aura is the mobile half of the Nephele Workshop ecosystem. It connects to a running desktop session (PySide6 client) over a WebSocket relay hosted on Cloudflare Durable Objects, so the artist can keep drawing on the desktop while triaging Eagle references, watching agent output, or kicking off a pipeline from the phone.
 
 The desktop client tree is closed source; for the auditable subset see [nephele-core-audit](https://github.com/CreatorAris/nephele-core-audit).
 

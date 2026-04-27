@@ -6,7 +6,7 @@
   <img alt="github contribution snake animation" src="https://raw.githubusercontent.com/CreatorAris/CreatorAris/dist/github-snake.svg" />
 </picture>
 
-# Nephele Remote
+# Nephele Aura
 
 [Nephele Workshop](https://nephele.arisfusion.com) 的移动伴侣端 —— 用 Expo / React Native 写的 App，连接到正在运行的桌面端会话，让画师在桌面端画画的同时，用手机浏览 Eagle 素材库、查看 Agent 进度、远程触发 Pipeline，不打断创作节奏。
 
@@ -14,8 +14,8 @@
 [![Expo](https://img.shields.io/badge/Expo-SDK%2054-000020.svg)](https://expo.dev)
 [![React Native](https://img.shields.io/badge/React%20Native-0.81-61DAFB.svg)](https://reactnative.dev)
 [![Status](https://img.shields.io/badge/status-alpha-orange.svg)](#状态)
-[![GitHub stars](https://img.shields.io/github/stars/CreatorAris/nephele-remote.svg)](https://github.com/CreatorAris/nephele-remote/stargazers)
-[![GitHub last commit](https://img.shields.io/github/last-commit/CreatorAris/nephele-remote.svg)](https://github.com/CreatorAris/nephele-remote/commits)
+[![GitHub stars](https://img.shields.io/github/stars/CreatorAris/nephele-aura.svg)](https://github.com/CreatorAris/nephele-aura/stargazers)
+[![GitHub last commit](https://img.shields.io/github/last-commit/CreatorAris/nephele-aura.svg)](https://github.com/CreatorAris/nephele-aura/commits)
 
 [English](README.md) · [Nephele Workshop](https://nephele.arisfusion.com)
 
@@ -23,7 +23,7 @@
 
 ## 这是什么
 
-Nephele Remote 是 Nephele Workshop 生态的移动端。它通过部署在 Cloudflare Durable Object 上的 WebSocket 中继，连接到正在运行的桌面端 (PySide6)，让画师能在画画时用手机看素材、监控 Agent 输出、启动 Pipeline，而不打断主创作节奏。
+Nephele Aura 是 Nephele Workshop 生态的移动端。它通过部署在 Cloudflare Durable Object 上的 WebSocket 中继，连接到正在运行的桌面端 (PySide6)，让画师能在画画时用手机看素材、监控 Agent 输出、启动 Pipeline，而不打断主创作节奏。
 
 桌面端代码闭源；公开的可审计子集见 [nephele-core-audit](https://github.com/CreatorAris/nephele-core-audit)。
 
