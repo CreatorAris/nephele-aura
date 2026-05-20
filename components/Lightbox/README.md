@@ -16,19 +16,19 @@ ATProto types) and rebuild on Tamagui + plain React 19.
 |---|---|
 | `types.ts` | ✅ adapted (dropped avatar variants + alt label) |
 | `pager/transforms.ts` | ✅ verbatim (pure worklet math) |
-| `pager/ImagePager.tsx` | 🚧 stub |
-| `pager/ImageItem/index.tsx` | ✅ platform router stub |
-| `pager/ImageItem/ImageItem.android.tsx` | 🚧 stub (priority for Aura) |
-| `pager/ImageItem/ImageItem.ios.tsx` | 🚧 stub (Phase 4) |
-| `state.tsx` | ⬜ not yet created (uses Aura context, not Bluesky's) |
-| `chrome/*` | ⬜ not porting (Aura already has rating bar) |
+| `pager/ImagePager.tsx` | ✅ ported (pager + LightboxView + LightboxImage) |
+| `pager/ImageItem/index.tsx` | ✅ platform router |
+| `pager/ImageItem/ImageItem.android.tsx` | ✅ ported (pinch / pan / double-tap / dismiss) |
+| `pager/ImageItem/ImageItem.ios.tsx` | 🚧 stub (deferred) |
+| `state.tsx` | ✅ created with Aura context |
+| `chrome/*` | ⬜ not porting (Aura uses route-level rating bar) |
 
 ## Phase progress
 
-- **Phase 1 — Skeleton (this commit):** directory + small files + stubs. TS clean. Nothing imports from here yet.
-- **Phase 2 — Port ImagePager + ImageItem.android:** real worklet transforms, gesture composition, hero open/close springs.
-- **Phase 3 — Cutover:** swap `FullscreenLightbox` in `app/(tabs)/index.tsx` from `react-native-awesome-gallery` to this. Remove the awesome-gallery dep.
-- **Phase 4 — iOS variant + polish:** port `ImageItem.ios.tsx`. Handle close-when-thumb-offscreen (Bluesky also falls back to fade in that case).
+- **Phase 1 — Skeleton:** ✅ directory + small files + stubs landed.
+- **Phase 2 — Port ImagePager + ImageItem.android:** ✅ real worklet transforms, gesture composition, hero open/close springs.
+- **Phase 3 — Cutover:** ✅ `app/(tabs)/index.tsx` now opens this Lightbox via `useLightboxControls().openLightbox(...)`. `react-native-awesome-gallery` removed from `package.json` (lockfile cleanup deferred — see TODO).
+- **Phase 4 — iOS variant + polish:** ⬜ deferred. Aura is Android-only today; revisit when iOS becomes a target. Includes: port `ImageItem.ios.tsx` (~359 lines of Bluesky's ScrollView-based zoom), close-when-thumb-offscreen fade fallback.
 
 ## Source files (read-only references)
 
