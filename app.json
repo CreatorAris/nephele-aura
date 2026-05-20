@@ -15,7 +15,7 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.creatoraris.nephele.remote"
+      "bundleIdentifier": "com.creatoraris.nephele.aura"
     },
     "android": {
       "adaptiveIcon": {
@@ -25,13 +25,15 @@
       "edgeToEdgeEnabled": true,
       "usesCleartextTraffic": true,
       "softwareKeyboardLayoutMode": "resize",
-      "package": "com.creatoraris.nephele.remote"
+      "package": "com.creatoraris.nephele.aura"
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-router"
+      "expo-router",
+      "expo-font",
+      "expo-asset"
     ]
   }
 }

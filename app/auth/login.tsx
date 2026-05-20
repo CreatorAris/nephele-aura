@@ -1,4 +1,5 @@
-import { StyleSheet, KeyboardAvoidingView, Platform, Image } from 'react-native';
+import { StyleSheet, KeyboardAvoidingView, Platform } from 'react-native';
+import { Image } from 'expo-image';
 import { YStack, Text, Input, Button } from 'tamagui';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useState, useEffect, useRef } from 'react';

@@ -8,7 +8,7 @@
 
 # Nephele Aura
 
-Mobile companion for [Nephele Workshop](https://nephele.arisfusion.com) — an Expo / React Native app that connects to a running desktop session, so the artist can browse Eagle references, watch agent progress, and trigger pipelines from a phone without breaking flow on the desktop.
+Mobile companion for [Nephele Workshop](https://nephele.arisfusion.com) — an Expo / React Native app that connects to a running desktop session, so the artist can browse their reference library from a phone without breaking flow on the desktop.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Expo](https://img.shields.io/badge/Expo-SDK%2054-000020.svg)](https://expo.dev)
@@ -23,13 +23,13 @@ Mobile companion for [Nephele Workshop](https://nephele.arisfusion.com) — an E
 
 ## What this is
 
-Nephele Aura is the mobile half of the Nephele Workshop ecosystem. It connects to a running desktop session (PySide6 client) over a WebSocket relay hosted on Cloudflare Durable Objects, so the artist can keep drawing on the desktop while triaging Eagle references, watching agent output, or kicking off a pipeline from the phone.
+Nephele Aura is the mobile half of the Nephele Workshop ecosystem. It connects to a running desktop session (PySide6 client) over a WebSocket relay hosted on Cloudflare Durable Objects, so the artist can keep drawing on the desktop while triaging the reference library from the phone.
 
 The desktop client tree is closed source; for the auditable subset see [nephele-core-audit](https://github.com/CreatorAris/nephele-core-audit).
 
 ## Status
 
-Alpha. Mobile builds are not on App Store / Play Store yet. The bridge protocol and the five screens (Workshop / Gallery / Agent / Pipeline / Profile) are all functional and integrated with the desktop client.
+Alpha. Mobile builds are not on App Store / Play Store yet. Aura currently focuses on library browsing — agent chat, pipelines, and other desktop-tool surfaces have been deferred until the browsing experience is solid.
 
 ## Architecture
 
@@ -39,7 +39,7 @@ Mobile (Expo + React Native + Tamagui)
 Cloudflare Durable Object (RemoteRelay, hibernation-safe)
     <-- WebSocket -->
 Desktop (PySide6 + Python, core/remote_bridge.py)
-    <--> Eagle, Agent, Pipeline, file server
+    <--> Library (Eagle .library format), file server
 ```
 
 Image transfer:
@@ -53,17 +53,14 @@ Auth: email OTP. Mobile clients declare `X-Client-Type: nephele-mobile-v1` to by
 
 | Screen | Contents |
 |:---|:---|
-| Workshop | Connection status, credit balance, quick actions |
-| Gallery | Eagle folder tree + masonry waterfall + pinch-to-zoom lightbox |
-| Agent | Streaming chat, tool call display, abort |
-| Pipeline | Real-time step progress, start control |
+| Gallery | Library folder tree + tag/rating filters + masonry waterfall + pinch-to-zoom lightbox; multi-select batch ops, phone-gallery import, pose search |
 | Profile | Email OTP login, logout |
 
 ## Repository layout
 
 | Path | Contents |
 |:---|:---|
-| `app/` | expo-router file-based routes (tabs, auth, workshop) |
+| `app/` | expo-router file-based routes (tabs, auth) |
 | `components/` | Shared UI primitives (Tamagui-based) |
 | `utils/` | Auth, WebSocket client, theme tokens |
 | `assets/` | App icons, splash |

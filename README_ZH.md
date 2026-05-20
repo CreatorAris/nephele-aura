@@ -8,7 +8,7 @@
 
 # Nephele Aura
 
-[Nephele Workshop](https://nephele.arisfusion.com) 的移动伴侣端 —— 用 Expo / React Native 写的 App，连接到正在运行的桌面端会话，让画师在桌面端画画的同时，用手机浏览 Eagle 素材库、查看 Agent 进度、远程触发 Pipeline，不打断创作节奏。
+[Nephele Workshop](https://nephele.arisfusion.com) 的移动伴侣端 —— 用 Expo / React Native 写的 App，连接到正在运行的桌面端会话，让画师在桌面端画画的同时，用手机浏览素材库，不打断创作节奏。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Expo](https://img.shields.io/badge/Expo-SDK%2054-000020.svg)](https://expo.dev)
@@ -23,13 +23,13 @@
 
 ## 这是什么
 
-Nephele Aura 是 Nephele Workshop 生态的移动端。它通过部署在 Cloudflare Durable Object 上的 WebSocket 中继，连接到正在运行的桌面端 (PySide6)，让画师能在画画时用手机看素材、监控 Agent 输出、启动 Pipeline，而不打断主创作节奏。
+Nephele Aura 是 Nephele Workshop 生态的移动端。它通过部署在 Cloudflare Durable Object 上的 WebSocket 中继，连接到正在运行的桌面端 (PySide6)，让画师能在画画时用手机翻看素材库，而不打断主创作节奏。
 
 桌面端代码闭源；公开的可审计子集见 [nephele-core-audit](https://github.com/CreatorAris/nephele-core-audit)。
 
 ## 状态
 
-Alpha。Mobile 包暂未上架 App Store / Play Store。远程桥接协议与 5 个屏幕（Workshop / Gallery / Agent / Pipeline / Profile）全部已跑通并与桌面端集成。
+Alpha。Mobile 包暂未上架 App Store / Play Store。当前阶段专注图片浏览，agent 对话、pipeline 等桌面端工具入口暂时砍掉，等浏览体验打磨好之后再回来。
 
 ## 架构
 
@@ -39,7 +39,7 @@ Mobile (Expo + React Native + Tamagui)
 Cloudflare Durable Object (RemoteRelay, 支持 Hibernation)
     <-- WebSocket -->
 Desktop (PySide6 + Python, core/remote_bridge.py)
-    <--> Eagle, Agent, Pipeline, file server
+    <--> 素材库 (Eagle .library 格式), file server
 ```
 
 图像传输：
@@ -53,17 +53,14 @@ Desktop (PySide6 + Python, core/remote_bridge.py)
 
 | 屏幕 | 内容 |
 |:---|:---|
-| Workshop | 连接状态、积分、快捷动作 |
-| Gallery | Eagle 文件夹树 + 瀑布流缩略图 + 双指缩放灯箱 |
-| Agent | 流式对话、工具调用展示、中断 |
-| Pipeline | 实时步骤进度、启动控制 |
+| Gallery | 素材库文件夹树 + 标签/评分筛选 + 瀑布流缩略图 + 双指缩放灯箱；多选批量操作、相册导入、姿势搜索 |
 | Profile | 邮箱 OTP 登录、注销 |
 
 ## 仓库结构
 
 | 路径 | 内容 |
 |:---|:---|
-| `app/` | expo-router 文件式路由（tabs / auth / workshop） |
+| `app/` | expo-router 文件式路由（tabs / auth） |
 | `components/` | 共享 UI 原语（Tamagui） |
 | `utils/` | 认证、WebSocket 客户端、主题 token |
 | `assets/` | App 图标、启动图 |

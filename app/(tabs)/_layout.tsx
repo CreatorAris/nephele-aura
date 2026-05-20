@@ -1,12 +1,37 @@
-import { Tabs } from 'expo-router';
-import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { useEffect, useRef, useCallback } from 'react';
+import { Tabs, useRouter } from 'expo-router';
+import { Images, User } from 'lucide-react-native';
+import { useEffect, useRef } from 'react';
 import { BackHandler, ToastAndroid, Platform } from 'react-native';
 import { useNavigation } from 'expo-router';
+import { isLoggedIn, logout } from '../../utils/auth';
+import { remoteWS } from '../../utils/websocket';
 
 export default function TabLayout() {
   const lastBack = useRef(0);
   const navigation = useNavigation();
+  const router = useRouter();
+
+  // Auth gate: on mount + on WS auth-invalid event, kick to login if the
+  // stored token is missing or past its exp. Without this, an expired JWT
+  // just looped reconnect forever and the user saw "桌面端未连接" with no
+  // hint to re-login.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const ok = await isLoggedIn();
+      if (!ok && !cancelled) router.replace('/auth/login');
+    })();
+
+    const unsub = remoteWS.onAuthInvalid(async () => {
+      await logout();
+      router.replace('/auth/login');
+    });
+
+    return () => {
+      cancelled = true;
+      unsub();
+    };
+  }, [router]);
 
   // Double-press back to exit on tab screens
   useEffect(() => {
@@ -50,16 +75,7 @@ export default function TabLayout() {
         options={{
           title: '素材库',
           tabBarIcon: ({ color, size }) => (
-            <MaterialCommunityIcons name="image-multiple" color={color} size={size} />
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="workshop"
-        options={{
-          title: '工坊',
-          tabBarIcon: ({ color, size }) => (
-            <MaterialCommunityIcons name="tools" color={color} size={size} />
+            <Images color={color} size={size} />
           ),
         }}
       />
@@ -68,7 +84,7 @@ export default function TabLayout() {
         options={{
           title: '我的',
           tabBarIcon: ({ color, size }) => (
-            <MaterialCommunityIcons name="account" color={color} size={size} />
+            <User color={color} size={size} />
           ),
         }}
       />

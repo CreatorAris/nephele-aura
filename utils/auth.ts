@@ -124,9 +124,36 @@ export async function getUserInfo(): Promise<UserInfo | null> {
   try { return JSON.parse(raw) as UserInfo; } catch { return null; }
 }
 
+/**
+ * Decode a JWT and check whether the `exp` claim has passed.
+ * Returns true on any parse failure — we'd rather force a re-login
+ * than carry a token we can't reason about.
+ */
+export function isTokenExpired(token: string): boolean {
+  try {
+    const part = token.split('.')[1];
+    if (!part) return true;
+    let b64 = part.replace(/-/g, '+').replace(/_/g, '/');
+    while (b64.length % 4) b64 += '=';
+    const decoded = globalThis.atob ? globalThis.atob(b64) : '';
+    if (!decoded) return true;
+    const payload = JSON.parse(decoded) as { exp?: number };
+    if (!payload.exp) return true;
+    return payload.exp * 1000 <= Date.now();
+  } catch {
+    return true;
+  }
+}
+
 export async function isLoggedIn(): Promise<boolean> {
   const token = await getToken();
-  return token !== null && token.length > 0;
+  if (!token || token.length === 0) return false;
+  if (isTokenExpired(token)) {
+    // Wipe the stale token so subsequent reads don't keep returning it
+    await logout();
+    return false;
+  }
+  return true;
 }
 
 export async function logout(): Promise<void> {
