@@ -4,13 +4,14 @@ import {
 } from 'react-native';
 import { Image } from 'expo-image';
 import { FlashList } from '@shopify/flash-list';
+import PagerView from 'react-native-pager-view';
 import { YStack, XStack, Text, Spinner, Button, Input } from 'tamagui';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   Unplug, Search, CircleX, ImagePlus, X, FolderPlus,
   Images, Check, Folder, SquareCheck, Square,
   Image as ImageIcon, Star, Tag, Trash2, CircleCheck,
-  MoreVertical, SlidersHorizontal,
+  MoreVertical, SlidersHorizontal, Crosshair, Link2, Plus,
   type LucideIcon,
 } from 'lucide-react-native';
 import React, { useState, useEffect, useCallback, useRef, memo } from 'react';
@@ -23,7 +24,10 @@ import Animated, {
 import { remoteWS, RemoteMessage, RemoteWebSocket } from '../../utils/websocket';
 import { isLoggedIn } from '../../utils/auth';
 import { useLightbox, useLightboxControls, type ImageSource as LbImageSource } from '../../components/Lightbox';
+import { colors } from '../../theme/colors';
+import { TAB_BAR_CLEARANCE } from '../../components/FloatingTabBar';
 import * as ImagePicker from 'expo-image-picker';
+import { useShareIntent } from 'expo-share-intent';
 
 // --- Types ---
 
@@ -32,6 +36,11 @@ type LibraryFolder = {
   count?: number;
   imageCount?: number;
   folderCount?: number;
+  // New in 2026-05-21: desktop now ships the full Eagle folder tree (instead
+  // of a flat imageCount>0 subset), preserving color + nested children so
+  // Aura can render the same visual identity as the desktop sidebar.
+  color?: string;
+  children?: LibraryFolder[];
 };
 
 type LibraryItem = {
@@ -66,6 +75,7 @@ export default function GalleryScreen() {
   const [connected, setConnected] = useState(
     remoteWS.getState() === 'connected' && remoteWS.getDesktopOnline()
   );
+  const [wsState, setWsState] = useState(() => remoteWS.getState());
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [items, setItems] = useState<LibraryItem[]>([]);
@@ -113,7 +123,10 @@ export default function GalleryScreen() {
     const updateConnected = () => setConnected(
       remoteWS.getState() === 'connected' && remoteWS.getDesktopOnline()
     );
-    const unsubState = remoteWS.onStateChange(updateConnected);
+    const unsubState = remoteWS.onStateChange((s) => {
+      setWsState(s);
+      updateConnected();
+    });
     const unsubDesktop = remoteWS.onDesktopStateChange(updateConnected);
     return () => { unsubState(); unsubDesktop(); };
   }, []);
@@ -198,9 +211,43 @@ export default function GalleryScreen() {
     }
   }, [selectedIds, items]);
 
-  // Phone gallery → library import (Phase 3). Sequential R2 upload (concurrency
-  // 1 keeps the radio happy and lets us report a meaningful per-item progress).
-  // Imports into the currently active folder if one is selected.
+  // Phone gallery/camera → library import (Phase 3). Sequential R2 upload
+  // (concurrency 1 keeps the radio happy and lets us report a meaningful
+  // per-item progress). Imports into the currently active folder if one is
+  // selected.
+  const processAssets = useCallback(async (
+    assets: { uri: string; mimeType?: string | null }[],
+  ) => {
+    const total = assets.length;
+    const urls: string[] = [];
+    let failed = 0;
+    setImportState({ stage: 'uploading', current: 0, total, failed: 0 });
+
+    for (let i = 0; i < assets.length; i++) {
+      const a = assets[i];
+      try {
+        const mime = a.mimeType || (a.uri.endsWith('.png') ? 'image/png' : 'image/jpeg');
+        const url = await RemoteWebSocket.uploadImage(a.uri, mime);
+        urls.push(url);
+      } catch (e) {
+        failed += 1;
+        console.warn('[import] upload failed', e);
+      }
+      setImportState({ stage: 'uploading', current: i + 1, total, failed });
+    }
+
+    if (urls.length === 0) {
+      setImportState({ stage: 'done', processed: 0, failed, total });
+      return;
+    }
+
+    setImportState({
+      stage: 'importing', uploaded: urls.length, total,
+      progress: 0, failed,
+    });
+    remoteWS.importFiles(urls, { folderId: activeFolder?.id });
+  }, [activeFolder]);
+
   const importFromGallery = useCallback(async () => {
     if (importState.stage !== 'idle' && importState.stage !== 'done') return;
     try {
@@ -216,42 +263,66 @@ export default function GalleryScreen() {
         quality: 1,
       });
       if (picked.canceled || picked.assets.length === 0) return;
-
-      const assets = picked.assets;
-      const total = assets.length;
-      const urls: string[] = [];
-      let failed = 0;
-      setImportState({ stage: 'uploading', current: 0, total, failed: 0 });
-
-      for (let i = 0; i < assets.length; i++) {
-        const a = assets[i];
-        try {
-          const mime = a.mimeType || (a.uri.endsWith('.png') ? 'image/png' : 'image/jpeg');
-          const url = await RemoteWebSocket.uploadImage(a.uri, mime);
-          urls.push(url);
-        } catch (e) {
-          failed += 1;
-          console.warn('[import] upload failed', e);
-        }
-        setImportState({ stage: 'uploading', current: i + 1, total, failed });
-      }
-
-      if (urls.length === 0) {
-        setImportState({ stage: 'done', processed: 0, failed, total });
-        return;
-      }
-
-      setImportState({
-        stage: 'importing', uploaded: urls.length, total,
-        progress: 0, failed,
-      });
-      remoteWS.importFiles(urls, { folderId: activeFolder?.id });
+      await processAssets(picked.assets);
     } catch (e) {
       console.warn('[import] aborted', e);
       setImportState({ stage: 'idle' });
       Alert.alert('导入失败', String(e));
     }
-  }, [importState.stage, activeFolder]);
+  }, [importState.stage, processAssets]);
+
+  const importFromCamera = useCallback(async () => {
+    if (importState.stage !== 'idle' && importState.stage !== 'done') return;
+    try {
+      const perm = await ImagePicker.requestCameraPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert('需要相机权限', '请在系统设置里开启 Nephele 的相机访问。');
+        return;
+      }
+      const picked = await ImagePicker.launchCameraAsync({
+        mediaTypes: ['images'],
+        quality: 1,
+      });
+      if (picked.canceled || picked.assets.length === 0) return;
+      await processAssets(picked.assets);
+    } catch (e) {
+      console.warn('[import] aborted', e);
+      setImportState({ stage: 'idle' });
+      Alert.alert('拍照失败', String(e));
+    }
+  }, [importState.stage, processAssets]);
+
+  const chooseImportSource = useCallback(() => {
+    if (importState.stage !== 'idle' && importState.stage !== 'done') return;
+    Alert.alert('添加素材', undefined, [
+      { text: '拍照', onPress: importFromCamera },
+      { text: '从相册选', onPress: importFromGallery },
+      { text: '取消', style: 'cancel' },
+    ]);
+  }, [importState.stage, importFromCamera, importFromGallery]);
+
+  // Cross-app share: receive images shared from Twitter / X / Pixiv / gallery
+  // etc. via Android system share sheet. Same upload+import pipeline as the
+  // in-app gallery picker. Holds off while another import is in flight so we
+  // don't trample importState; the intent stays cached until we reset it.
+  const { hasShareIntent, shareIntent, resetShareIntent } = useShareIntent({
+    resetOnBackground: true,
+  });
+  useEffect(() => {
+    if (!hasShareIntent || !shareIntent?.files?.length) return;
+    if (importState.stage === 'uploading' || importState.stage === 'importing') return;
+    const assets = shareIntent.files
+      .filter(f => (f.mimeType || '').startsWith('image/'))
+      .map(f => ({
+        uri: f.path.startsWith('file://') ? f.path : `file://${f.path}`,
+        mimeType: f.mimeType,
+      }));
+    if (assets.length === 0) {
+      resetShareIntent();
+      return;
+    }
+    processAssets(assets).finally(() => resetShareIntent());
+  }, [hasShareIntent, shareIntent, importState.stage, processAssets, resetShareIntent]);
 
   // Ref so the import listener can call doSearch (declared later) without
   // creating a use-before-declaration loop.
@@ -327,7 +398,19 @@ export default function GalleryScreen() {
           thumbBorderRadius: 12,
         };
       });
-      openLightboxControl({ images: lbImages, index: idx });
+      openLightboxControl({
+        images: lbImages,
+        index: idx,
+        // When the lightbox closes we land back in the DetailModal — but if
+        // the user swiped to a different image, the modal would otherwise
+        // still show the originally-tapped item. Mirror the lightbox's final
+        // page into detailItem so the modal stays in sync. Use itemsRef so a
+        // stale items[] closure doesn't shadow a more recent state update.
+        onClose: (finalIndex: number) => {
+          const tgt = itemsRef.current[finalIndex];
+          if (tgt) setDetailItem(tgt);
+        },
+      });
     },
     [items, fileServerUrl, thumbs, openLightboxControl],
   );
@@ -680,58 +763,99 @@ export default function GalleryScreen() {
   }, [fileServerUrl, selectMode, selectedIds, toggleSelected, enterSelectMode, thumbsVersion]);
 
   if (!connected) {
+    const isConnecting = wsState === 'connecting';
     return (
-      <SafeAreaView style={{ flex: 1, backgroundColor: '#fafafa' }}>
-        <YStack padding="$4"><Text fontSize={28} fontWeight="700" color="#1d1d1f">素材库</Text></YStack>
-        <YStack flex={1} justifyContent="center" alignItems="center" gap="$3">
-          <YStack width={80} height={80} borderRadius={40} backgroundColor="#f0f0f0"
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.bg.canvas }}>
+        <YStack flex={1} justifyContent="center" alignItems="center"
+          paddingHorizontal="$5" gap="$3">
+          <YStack width={80} height={80} borderRadius={40}
+            backgroundColor={colors.bg.thumb}
             justifyContent="center" alignItems="center">
-            <Unplug size={36} color="#ccc" />
+            <Unplug size={36} color={colors.text.muted} />
           </YStack>
-          <Text color="#999" fontSize={16}>桌面端未连接</Text>
-          <Text color="#bbb" fontSize={13} textAlign="center" lineHeight={20}>
-            {'请在电脑上打开 Nephele'}
-          </Text>
+          <YStack alignItems="center" gap={6}>
+            <Text color={colors.text.primary} fontSize={17} fontWeight="600">
+              桌面端未连接
+            </Text>
+            <Text color={colors.text.tertiary} fontSize={13} textAlign="center" lineHeight={20}>
+              {isConnecting ? '正在连接…' : '请在电脑上打开 Nephele Workshop'}
+            </Text>
+          </YStack>
+          <Pressable
+            onPress={() => { if (!isConnecting) remoteWS.connect(); }}
+            disabled={isConnecting}
+            hitSlop={6}
+          >
+            <XStack
+              marginTop={12}
+              backgroundColor={isConnecting ? colors.bg.subtle : colors.brand.primary}
+              paddingHorizontal={20} paddingVertical={10}
+              borderRadius={20}
+              alignItems="center" gap={8}
+            >
+              {isConnecting && <Spinner size="small" color={colors.text.tertiary} />}
+              <Text fontSize={14} fontWeight="600"
+                color={isConnecting ? colors.text.tertiary : colors.bg.canvas}>
+                {isConnecting ? '连接中' : '重新连接'}
+              </Text>
+            </XStack>
+          </Pressable>
         </YStack>
       </SafeAreaView>
     );
   }
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: '#fafafa' }}>
-      {/* Search bar — pull-to-refresh replaces the old refresh icon button;
-          select mode toggle moved to kebab (one-tap for now; will expand to
-          action sheet once we add a second menu entry). */}
-      <XStack paddingHorizontal={16} paddingTop={10} paddingBottom={8} gap={14} alignItems="center">
-        <XStack flex={1} backgroundColor="#fff" borderRadius={12} paddingLeft={12}
-          alignItems="center" borderWidth={1} borderColor={searchQuery ? '#b388ff' : '#ececec'}
-          height={40}>
-          <Search size={18} color="#999" />
-          <Input flex={1} placeholder="搜索素材..." value={searchQuery}
-            onChangeText={onSearchChange} backgroundColor="transparent" borderWidth={0}
-            color="#1d1d1f" fontSize={14} height={38}
-            placeholderTextColor="#bbb" returnKeyType="search" />
-          {searchQuery ? (
-            <Pressable onPress={() => onSearchChange('')} style={{ paddingRight: 10 }} hitSlop={6}>
-              <CircleX size={16} color="#ccc" />
-            </Pressable>
-          ) : null}
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.bg.canvas }}>
+      {selectMode ? (
+        /* Select-mode header: replaces search/actions row entirely while
+            multi-select is active. Filter chips + count row are also
+            suppressed below so the chrome reads as a focused batch surface
+            (iOS Photos / Pinterest pattern). */
+        <XStack paddingHorizontal={16} paddingTop={10} paddingBottom={8}
+          height={56} alignItems="center" gap={14}>
+          <Pressable onPress={exitSelectMode} hitSlop={8}>
+            <X size={22} color={colors.text.secondary} />
+          </Pressable>
+          <Text flex={1} fontSize={16} fontWeight="600" color={colors.text.primary}>
+            {selectedIds.size > 0 ? `已选 ${selectedIds.size} 项` : '请选择'}
+          </Text>
         </XStack>
-        <Pressable onPress={importFromGallery} hitSlop={8}
-          disabled={importState.stage === 'uploading' || importState.stage === 'importing'}>
-          <ImagePlus size={22}
-            color={importState.stage === 'uploading' || importState.stage === 'importing'
-              ? '#ccc' : '#666'} />
-        </Pressable>
-        <Pressable onPress={selectMode ? exitSelectMode : () => enterSelectMode()} hitSlop={8}>
-          {selectMode
-            ? <X size={22} color="#666" />
-            : <MoreVertical size={22} color="#666" />}
-        </Pressable>
-      </XStack>
+      ) : (
+        /* Normal header — search bar + import + kebab. Pull-to-refresh
+            replaces the old refresh icon button; kebab toggles select mode
+            (will expand to a real action sheet once a second entry lands). */
+        <XStack paddingHorizontal={16} paddingTop={10} paddingBottom={8} gap={14} alignItems="center">
+          <XStack flex={1} backgroundColor={colors.bg.surface} borderRadius={12} paddingLeft={12}
+            alignItems="center" borderWidth={1} borderColor={searchQuery ? colors.brand.primary : colors.border.default}
+            height={40}>
+            <Search size={18} color={colors.text.tertiary} />
+            <Input flex={1} placeholder="搜索素材..." value={searchQuery}
+              onChangeText={onSearchChange} backgroundColor="transparent" borderWidth={0}
+              color={colors.text.primary} fontSize={14} height={38}
+              placeholderTextColor={colors.text.muted} returnKeyType="search" />
+            {searchQuery ? (
+              <Pressable onPress={() => onSearchChange('')} style={{ paddingRight: 10 }} hitSlop={6}>
+                <CircleX size={16} color={colors.text.faint} />
+              </Pressable>
+            ) : null}
+          </XStack>
+          <Pressable onPress={chooseImportSource} hitSlop={8}
+            disabled={importState.stage === 'uploading' || importState.stage === 'importing'}>
+            <ImagePlus size={22}
+              color={importState.stage === 'uploading' || importState.stage === 'importing'
+                ? colors.text.faint : colors.text.secondary} />
+          </Pressable>
+          <Pressable onPress={() => enterSelectMode()} hitSlop={8}>
+            <MoreVertical size={22} color={colors.text.secondary} />
+          </Pressable>
+        </XStack>
+      )}
 
       {/* Filter row — folder chip + combined filter chip (tag + rating live
-          in TagPickerSheet now); count moved inline to the right edge. */}
+          in TagPickerSheet now); count moved inline to the right edge.
+          Hidden in select mode to keep the chrome focused on the batch task. */}
+      {!selectMode && (
       <XStack paddingHorizontal={16} paddingBottom={10} alignItems="center" gap={8}>
         <ScrollView horizontal showsHorizontalScrollIndicator={false}
           style={{ flexGrow: 1, flexShrink: 1 }}
@@ -747,21 +871,22 @@ export default function GalleryScreen() {
           {hasAnyFilter && (
             <Pressable onPress={clearAllFilters} hitSlop={4}>
               <XStack alignItems="center" gap={4} paddingHorizontal={6} paddingVertical={5}>
-                <X size={14} color="#999" />
-                <Text fontSize={12} color="#999">清除</Text>
+                <X size={14} color={colors.text.tertiary} />
+                <Text fontSize={12} color={colors.text.tertiary}>清除</Text>
               </XStack>
             </Pressable>
           )}
         </ScrollView>
         {totalItems > 0 && (
-          <Text fontSize={12} color="#999">{totalItems}</Text>
+          <Text fontSize={12} color={colors.text.tertiary}>{totalItems}</Text>
         )}
       </XStack>
+      )}
 
       {error ? (
-        <YStack marginHorizontal="$4" marginBottom="$2" backgroundColor="#fff3f3"
+        <YStack marginHorizontal="$4" marginBottom="$2" backgroundColor={colors.bg.surface}
           borderRadius="$3" padding="$2.5">
-          <Text color="#cc4444" fontSize={13}>{error}</Text>
+          <Text color={colors.status.error} fontSize={13}>{error}</Text>
         </YStack>
       ) : null}
 
@@ -778,7 +903,7 @@ export default function GalleryScreen() {
           // key. Index keys break when items grows (loadMore append), causing
           // cells to misidentify which item they're rendering after recycle.
           keyExtractor={(item: LibraryItem) => item.id}
-          contentContainerStyle={{ paddingHorizontal: PAD, paddingBottom: 20 }}
+          contentContainerStyle={{ paddingHorizontal: PAD, paddingBottom: TAB_BAR_CLEARANCE }}
           onEndReached={loadMore}
           onEndReachedThreshold={0.5}
           onViewableItemsChanged={onViewableItemsChanged}
@@ -789,17 +914,61 @@ export default function GalleryScreen() {
           refreshing={loading && items.length > 0}
           onRefresh={() => doSearch(searchParamsRef.current)}
           ListEmptyComponent={
-            <YStack paddingTop="$10" alignItems="center">
-              <Text color="#999" fontSize={14}>
-                {activeFolder ? '该文件夹没有图片' : '素材库中没有图片'}
-              </Text>
+            <YStack paddingTop={60} alignItems="center" gap={12} paddingHorizontal="$5">
+              <YStack width={72} height={72} borderRadius={36}
+                backgroundColor={colors.bg.thumb}
+                justifyContent="center" alignItems="center">
+                <Images size={32} color={colors.text.muted} />
+              </YStack>
+              {hasAnyFilter ? (
+                <>
+                  <Text color={colors.text.primary} fontSize={16} fontWeight="600">
+                    没有匹配的图片
+                  </Text>
+                  <Text color={colors.text.tertiary} fontSize={13} textAlign="center">
+                    换个筛选条件再试试
+                  </Text>
+                  <Pressable onPress={clearAllFilters} hitSlop={6} style={{ marginTop: 4 }}>
+                    <Text color={colors.brand.primary} fontSize={14} fontWeight="600">
+                      清除筛选
+                    </Text>
+                  </Pressable>
+                </>
+              ) : activeFolder ? (
+                <>
+                  <Text color={colors.text.primary} fontSize={16} fontWeight="600">
+                    这个文件夹是空的
+                  </Text>
+                  <Text color={colors.text.tertiary} fontSize={13} textAlign="center">
+                    切到其他文件夹或导入图片
+                  </Text>
+                </>
+              ) : (
+                <>
+                  <Text color={colors.text.primary} fontSize={16} fontWeight="600">
+                    素材库还没图
+                  </Text>
+                  <Text color={colors.text.tertiary} fontSize={13} textAlign="center">
+                    从手机相册导入开始
+                  </Text>
+                  <Pressable onPress={importFromGallery} hitSlop={6} style={{ marginTop: 4 }}>
+                    <XStack alignItems="center" gap={6}
+                      backgroundColor={colors.brand.primary}
+                      paddingHorizontal={16} paddingVertical={8}
+                      borderRadius={20}>
+                      <ImagePlus size={16} color={colors.bg.canvas} />
+                      <Text color={colors.bg.canvas} fontSize={14} fontWeight="600">导入图片</Text>
+                    </XStack>
+                  </Pressable>
+                </>
+              )}
             </YStack>
           }
           ListFooterComponent={
             loadingMore ? (
-              <YStack padding="$3" alignItems="center"><Spinner size="small" color="#b388ff" /></YStack>
+              <YStack padding="$3" alignItems="center"><Spinner size="small" color={colors.brand.primary} /></YStack>
             ) : items.length > 0 && items.length >= totalItems ? (
-              <YStack padding="$3" alignItems="center"><Text color="#ccc" fontSize={12}>已加载全部</Text></YStack>
+              <YStack padding="$3" alignItems="center"><Text color={colors.text.faint} fontSize={12}>已加载全部</Text></YStack>
             ) : null
           }
         />
@@ -842,13 +1011,17 @@ export default function GalleryScreen() {
         onClose={() => setTagPickerOpen(false)}
       />
 
-      {/* Detail Modal */}
-      <DetailModal item={detailItem}
-        thumb={detailItem
-          ? (fileServerUrl
-              ? `${fileServerUrl}/thumb/${detailItem.id}`
-              : thumbs[detailItem.id])
-          : undefined}
+      {/* Detail Modal — items + onIndexChange let the modal page horizontally
+          through the gallery in lock-step with the lightbox: swipe in either
+          surface updates detailItem, the other surface follows. */}
+      <DetailModal
+        item={detailItem}
+        items={items}
+        getThumb={(id) => (fileServerUrl ? `${fileServerUrl}/thumb/${id}` : thumbs[id])}
+        onIndexChange={(i) => {
+          const tgt = itemsRef.current[i];
+          if (tgt) setDetailItem(tgt);
+        }}
         onClose={() => setDetailItem(null)}
         onOpenLightbox={openLightboxAt}
         onUpdateItem={updateItemOptimistic}
@@ -879,6 +1052,24 @@ export default function GalleryScreen() {
 
 // --- Folder filter bottom sheet ---
 
+// Walk the Eagle folder tree depth-first into a flat row list, tagging each
+// row with its depth so the renderer can indent children without losing the
+// "every folder is one tap" property the previous flat API gave users. We
+// don't do real drill-down here — folder search already recurses into
+// children server-side (lib.get_items_in_folder(..., recursive=True)), so
+// selecting any visible row pulls the right items regardless of depth.
+type FolderRow = LibraryFolder & { depth: number };
+function flattenFolderTree(folders: LibraryFolder[], depth = 0): FolderRow[] {
+  const out: FolderRow[] = [];
+  for (const f of folders) {
+    out.push({ ...f, depth });
+    if (f.children && f.children.length) {
+      out.push(...flattenFolderTree(f.children, depth + 1));
+    }
+  }
+  return out;
+}
+
 function FolderFilterSheet({ visible, folders, activeId, onSelect, onClose,
                              onCreate, onRequestRename }: {
   visible: boolean; folders: LibraryFolder[];
@@ -889,15 +1080,18 @@ function FolderFilterSheet({ visible, folders, activeId, onSelect, onClose,
   onRequestRename?: (f: LibraryFolder) => void;
 }) {
   const insets = useSafeAreaInsets();
+  // Flatten on each render — folders is small (≤ hundreds) so memoization
+  // would mostly add noise. If we ever see real cost, wrap with useMemo.
+  const rows = visible ? flattenFolderTree(folders) : [];
   if (!visible) return null;
 
   return (
     <Modal visible animationType="slide" transparent onRequestClose={onClose}>
-      <Pressable style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.4)' }} onPress={onClose}>
+      <Pressable style={{ flex: 1, backgroundColor: colors.overlay.scrim }} onPress={onClose}>
         <Pressable
           style={{
             position: 'absolute', bottom: 0, left: 0, right: 0,
-            backgroundColor: '#fff',
+            backgroundColor: colors.bg.surface,
             borderTopLeftRadius: 20, borderTopRightRadius: 20,
             maxHeight: '70%',
             paddingBottom: insets.bottom || 16,
@@ -905,15 +1099,15 @@ function FolderFilterSheet({ visible, folders, activeId, onSelect, onClose,
           onPress={e => e.stopPropagation()}
         >
           <YStack alignItems="center" paddingVertical={10}>
-            <YStack width={36} height={4} borderRadius={2} backgroundColor="#ddd" />
+            <YStack width={36} height={4} borderRadius={2} backgroundColor={colors.text.muted} />
           </YStack>
           <XStack paddingHorizontal={16} marginBottom={8} alignItems="center" justifyContent="space-between">
-            <Text fontSize={17} fontWeight="600" color="#1d1d1f">按文件夹筛选</Text>
+            <Text fontSize={17} fontWeight="600" color={colors.text.primary}>按文件夹筛选</Text>
             {onCreate && (
               <Pressable onPress={onCreate} hitSlop={6}>
                 <XStack alignItems="center" gap={4}>
-                  <FolderPlus size={18} color="#b388ff" />
-                  <Text fontSize={13} color="#b388ff" fontWeight="600">新建</Text>
+                  <FolderPlus size={18} color={colors.brand.primary} />
+                  <Text fontSize={13} color={colors.brand.primary} fontWeight="600">新建</Text>
                 </XStack>
               </Pressable>
             )}
@@ -921,38 +1115,55 @@ function FolderFilterSheet({ visible, folders, activeId, onSelect, onClose,
 
           <FlatList
             style={{ maxHeight: SCREEN_H * 0.55 }}
-            data={folders}
+            data={rows}
             keyExtractor={f => f.id}
-            initialNumToRender={15}
-            maxToRenderPerBatch={10}
+            initialNumToRender={20}
+            maxToRenderPerBatch={15}
             getItemLayout={(_, i) => ({ length: 44, offset: 44 * i, index: i })}
             ListHeaderComponent={
               <Pressable onPress={() => onSelect(null)}>
                 <XStack paddingHorizontal={16} paddingVertical={12} alignItems="center" gap={12}
-                  backgroundColor={activeId === null ? '#f8f0ff' : 'transparent'}>
+                  backgroundColor={activeId === null ? colors.brand.softer : 'transparent'}>
                   <Images size={20}
-                    color={activeId === null ? '#b388ff' : '#999'} />
-                  <Text flex={1} fontSize={15} color={activeId === null ? '#b388ff' : '#1d1d1f'}
+                    color={activeId === null ? colors.brand.primary : colors.text.tertiary} />
+                  <Text flex={1} fontSize={15} color={activeId === null ? colors.brand.primary : colors.text.primary}
                     fontWeight={activeId === null ? '600' : '400'}>全部图片</Text>
-                  {activeId === null && <Check size={18} color="#b388ff" />}
+                  {activeId === null && <Check size={18} color={colors.brand.primary} />}
                 </XStack>
               </Pressable>
+            }
+            ListEmptyComponent={
+              <YStack paddingVertical={32} paddingHorizontal={24} alignItems="center">
+                <Text fontSize={13} color={colors.text.tertiary} textAlign="center">
+                  这个 Eagle 库里还没有文件夹
+                </Text>
+              </YStack>
             }
             renderItem={({ item: f }) => {
               const isActive = f.id === activeId;
               const imgCount = f.imageCount ?? f.count ?? 0;
+              // 8px dot mirrors desktop EagleFolderTree.qml. Eagle's folder
+              // colors are plain CSS names (red/orange/yellow/green/blue/
+              // purple/pink/aqua) so they slot straight into RN style; fall
+              // back to the brand purple when the folder has no color set.
+              const dotColor = f.color || colors.brand.primary;
               return (
                 <Pressable onPress={() => onSelect(f)}
                   onLongPress={onRequestRename ? () => onRequestRename(f) : undefined}
                   delayLongPress={400}>
-                  <XStack paddingHorizontal={16} paddingVertical={12} alignItems="center" gap={12}
-                    backgroundColor={isActive ? '#f8f0ff' : 'transparent'}>
-                    <Folder size={20}
-                      color={isActive ? '#b388ff' : '#999'} />
-                    <Text flex={1} fontSize={15} color={isActive ? '#b388ff' : '#1d1d1f'}
-                      fontWeight={isActive ? '600' : '400'} numberOfLines={1}>{f.name}</Text>
-                    <Text fontSize={12} color="#bbb">{imgCount > 0 ? imgCount : ''}</Text>
-                    {isActive && <Check size={18} color="#b388ff" />}
+                  <XStack paddingVertical={12} alignItems="center" gap={10}
+                    paddingLeft={16 + f.depth * 18}
+                    paddingRight={16}
+                    backgroundColor={isActive ? colors.brand.softer : 'transparent'}>
+                    <YStack width={8} height={8} borderRadius={4} backgroundColor={dotColor} />
+                    <Text flex={1} fontSize={15}
+                      color={isActive ? colors.brand.primary : colors.text.primary}
+                      fontWeight={isActive ? '600' : '400'}
+                      numberOfLines={1}>{f.name}</Text>
+                    {imgCount > 0 && (
+                      <Text fontSize={12} color={colors.text.muted}>{imgCount}</Text>
+                    )}
+                    {isActive && <Check size={18} color={colors.brand.primary} />}
                   </XStack>
                 </Pressable>
               );
@@ -968,12 +1179,12 @@ function FolderFilterSheet({ visible, folders, activeId, onSelect, onClose,
 
 function FilterChip({ label, active, icon: Icon }: { label: string; active: boolean; icon: LucideIcon }) {
   return (
-    <XStack backgroundColor={active ? '#f0e6ff' : '#fff'}
+    <XStack backgroundColor={active ? colors.brand.soft : colors.bg.surface}
       borderRadius={16} paddingHorizontal={10} paddingVertical={5}
       alignItems="center" gap={4}
-      borderWidth={1} borderColor={active ? '#b388ff' : '#e8e8e8'}>
-      <Icon size={14} color={active ? '#b388ff' : '#999'} />
-      <Text fontSize={12} color={active ? '#b388ff' : '#666'} numberOfLines={1} maxWidth={120}>
+      borderWidth={1} borderColor={active ? colors.brand.primary : colors.border.default}>
+      <Icon size={14} color={active ? colors.brand.primary : colors.text.tertiary} />
+      <Text fontSize={12} color={active ? colors.brand.primary : colors.text.secondary} numberOfLines={1} maxWidth={120}>
         {label}
       </Text>
     </XStack>
@@ -1002,11 +1213,11 @@ function TagPickerSheet({ visible, tags, activeTags, onToggle,
 
   return (
     <Modal visible animationType="slide" transparent onRequestClose={onClose}>
-      <Pressable style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.4)' }} onPress={onClose}>
+      <Pressable style={{ flex: 1, backgroundColor: colors.overlay.scrim }} onPress={onClose}>
         <Pressable
           style={{
             position: 'absolute', bottom: 0, left: 0, right: 0,
-            backgroundColor: '#fff',
+            backgroundColor: colors.bg.surface,
             borderTopLeftRadius: 20, borderTopRightRadius: 20,
             maxHeight: '78%',
             paddingBottom: insets.bottom || 16,
@@ -1014,33 +1225,33 @@ function TagPickerSheet({ visible, tags, activeTags, onToggle,
           onPress={e => e.stopPropagation()}
         >
           <YStack alignItems="center" paddingVertical={10}>
-            <YStack width={36} height={4} borderRadius={2} backgroundColor="#ddd" />
+            <YStack width={36} height={4} borderRadius={2} backgroundColor={colors.text.muted} />
           </YStack>
-          <Text fontSize={17} fontWeight="600" color="#1d1d1f" paddingHorizontal={16} marginBottom={12}>
+          <Text fontSize={17} fontWeight="600" color={colors.text.primary} paddingHorizontal={16} marginBottom={12}>
             筛选
           </Text>
 
           {/* Rating row */}
           <XStack paddingHorizontal={16} marginBottom={14} alignItems="center" gap={8}>
-            <Text fontSize={13} color="#999" width={32}>评分</Text>
+            <Text fontSize={13} color={colors.text.tertiary} width={32}>评分</Text>
             {[3, 4, 5].map(r => (
               <Pressable key={r} onPress={() => onSetRating(r)} hitSlop={4}>
-                <XStack backgroundColor={rating === r ? '#f0e6ff' : '#fff'}
+                <XStack backgroundColor={rating === r ? colors.brand.soft : colors.bg.surface}
                   borderRadius={14} paddingHorizontal={10} paddingVertical={5}
                   alignItems="center" gap={4}
-                  borderWidth={1} borderColor={rating === r ? '#b388ff' : '#ececec'}>
+                  borderWidth={1} borderColor={rating === r ? colors.brand.primary : colors.border.default}>
                   <Star size={12}
-                    color={rating === r ? '#b388ff' : '#999'}
-                    fill={rating === r ? '#b388ff' : 'none'} />
-                  <Text fontSize={12} color={rating === r ? '#b388ff' : '#666'}>{r}+</Text>
+                    color={rating === r ? colors.brand.primary : colors.text.tertiary}
+                    fill={rating === r ? colors.brand.primary : 'none'} />
+                  <Text fontSize={12} color={rating === r ? colors.brand.primary : colors.text.secondary}>{r}+</Text>
                 </XStack>
               </Pressable>
             ))}
           </XStack>
 
-          <YStack height={1} backgroundColor="#f2f2f2" marginHorizontal={16} marginBottom={12} />
+          <YStack height={1} backgroundColor={colors.border.hairline} marginHorizontal={16} marginBottom={12} />
 
-          <Text fontSize={13} color="#999" paddingHorizontal={16} marginBottom={8}>标签</Text>
+          <Text fontSize={13} color={colors.text.tertiary} paddingHorizontal={16} marginBottom={8}>标签</Text>
 
           {/* Active tags */}
           {activeTags.length > 0 && (
@@ -1048,10 +1259,10 @@ function TagPickerSheet({ visible, tags, activeTags, onToggle,
               contentContainerStyle={{ paddingHorizontal: 16, gap: 6, paddingBottom: 8 }}>
               {activeTags.map(t => (
                 <Pressable key={t} onPress={() => onToggle(t)}>
-                  <XStack backgroundColor="#f0e6ff" borderRadius={12} paddingHorizontal={10}
+                  <XStack backgroundColor={colors.brand.soft} borderRadius={12} paddingHorizontal={10}
                     paddingVertical={4} alignItems="center" gap={4}>
-                    <Text fontSize={12} color="#b388ff">{t}</Text>
-                    <X size={12} color="#b388ff" />
+                    <Text fontSize={12} color={colors.brand.primary}>{t}</Text>
+                    <X size={12} color={colors.brand.primary} />
                   </XStack>
                 </Pressable>
               ))}
@@ -1061,8 +1272,8 @@ function TagPickerSheet({ visible, tags, activeTags, onToggle,
           {/* Search */}
           <XStack paddingHorizontal={16} marginBottom={8}>
             <Input flex={1} placeholder="搜索标签..." value={query} onChangeText={setQuery}
-              backgroundColor="#f5f5f7" borderWidth={0} borderRadius={8}
-              color="#1d1d1f" fontSize={14} height={36} placeholderTextColor="#bbb" />
+              backgroundColor={colors.bg.subtle} borderWidth={0} borderRadius={8}
+              color={colors.text.primary} fontSize={14} height={36} placeholderTextColor={colors.text.muted} />
           </XStack>
 
           <FlatList
@@ -1076,13 +1287,13 @@ function TagPickerSheet({ visible, tags, activeTags, onToggle,
               return (
                 <Pressable onPress={() => onToggle(t.name)}>
                   <XStack paddingHorizontal={16} paddingVertical={12} alignItems="center" gap={12}
-                    backgroundColor={isActive ? '#f8f0ff' : 'transparent'}>
+                    backgroundColor={isActive ? colors.brand.softer : 'transparent'}>
                     {isActive
-                      ? <SquareCheck size={20} color="#b388ff" />
-                      : <Square size={20} color="#ccc" />}
-                    <Text flex={1} fontSize={15} color={isActive ? '#b388ff' : '#1d1d1f'}
+                      ? <SquareCheck size={20} color={colors.brand.primary} />
+                      : <Square size={20} color={colors.text.faint} />}
+                    <Text flex={1} fontSize={15} color={isActive ? colors.brand.primary : colors.text.primary}
                       numberOfLines={1}>{t.name}</Text>
-                    <Text fontSize={12} color="#bbb">{t.count}</Text>
+                    <Text fontSize={12} color={colors.text.muted}>{t.count}</Text>
                   </XStack>
                 </Pressable>
               );
@@ -1114,9 +1325,8 @@ function CellInner({ item, thumb, selectMode, selected, onPress, onLongPress }: 
       onLongPress={onLongPress}
       delayLongPress={350}
     >
-      <YStack borderRadius={4} overflow="hidden"
-        borderWidth={selected ? 2 : 0} borderColor={selected ? '#b388ff' : 'transparent'}>
-        <YStack height={h} backgroundColor="#f0f0f0" justifyContent="center" alignItems="center">
+      <YStack borderRadius={4} overflow="hidden">
+        <YStack height={h} backgroundColor={colors.bg.thumb} justifyContent="center" alignItems="center">
           {thumb || item.blurhash
             ? <Image
                 // Removed recyclingKey: it conflicts with FlashList's own cell
@@ -1130,19 +1340,26 @@ function CellInner({ item, thumb, selectMode, selected, onPress, onLongPress }: 
                 cachePolicy="memory-disk"
                 placeholder={item.blurhash ? { blurhash: item.blurhash } : undefined}
               />
-            : <ImageIcon size={24} color="#ddd" />}
+            : <ImageIcon size={24} color={colors.text.muted} />}
           {/* Selection checkbox overlay — only visible in select mode */}
           {selectMode && (
             <YStack position="absolute" top={6} right={6}
               width={22} height={22} borderRadius={11}
-              backgroundColor={selected ? '#b388ff' : 'rgba(255,255,255,0.85)'}
-              borderWidth={1} borderColor={selected ? '#b388ff' : '#ccc'}
+              backgroundColor={selected ? colors.brand.primary : colors.overlay.onImage}
+              borderWidth={1} borderColor={selected ? colors.brand.primary : colors.text.faint}
               justifyContent="center" alignItems="center">
-              {selected && <Check size={14} color="#fff" />}
+              {selected && <Check size={14} color={colors.bg.canvas} />}
             </YStack>
           )}
         </YStack>
       </YStack>
+      {/* Selection ring — absolute overlay so toggling selected state doesn't
+          add 2px to the cell's layout box and shove neighbors around. */}
+      {selected && (
+        <YStack pointerEvents="none"
+          position="absolute" top={0} left={0} right={0} bottom={0}
+          borderRadius={4} borderWidth={2} borderColor={colors.brand.primary} />
+      )}
     </Pressable>
   );
 }
@@ -1167,7 +1384,7 @@ function SkeletonBlock({ h, pulseStyle }: {
     <Animated.View
       style={[
         pulseStyle,
-        { height: h, backgroundColor: '#eaeaea', borderRadius: 4, marginBottom: GAP },
+        { height: h, backgroundColor: colors.bg.skeleton, borderRadius: 4, marginBottom: GAP },
       ]}
     />
   );
@@ -1236,22 +1453,22 @@ function BatchActionBar({ count, onSetStar, onAddTag, onTrash }: {
 
   return (
     <YStack position="absolute" left={0} right={0} bottom={0}
-      backgroundColor="#fff" paddingTop={10}
+      backgroundColor={colors.bg.surface} paddingTop={10}
       paddingBottom={(insets.bottom || 0) + 10}
       paddingHorizontal={16}
-      borderTopWidth={1} borderTopColor="#eee">
+      borderTopWidth={1} borderTopColor={colors.border.subtle}>
       {/* Expandable panel above the action row */}
       {panel === 'star' && (
         <XStack justifyContent="center" gap={8} paddingBottom={10}>
           {[0, 1, 2, 3, 4, 5].map(n => (
             <Pressable key={n} hitSlop={6} onPress={() => { onSetStar(n); setPanel(null); }}>
               {n === 0 ? (
-                <XStack backgroundColor="#f5f5f7" borderRadius={16}
+                <XStack backgroundColor={colors.bg.subtle} borderRadius={16}
                   paddingHorizontal={10} paddingVertical={4}>
-                  <Text fontSize={12} color="#999">清除</Text>
+                  <Text fontSize={12} color={colors.text.tertiary}>清除</Text>
                 </XStack>
               ) : (
-                <Star size={26} color="#f7b500" fill="#f7b500" />
+                <Star size={26} color={colors.status.warning} fill={colors.status.warning} />
               )}
             </Pressable>
           ))}
@@ -1259,32 +1476,32 @@ function BatchActionBar({ count, onSetStar, onAddTag, onTrash }: {
       )}
       {panel === 'tag' && (
         <XStack alignItems="center" gap={8} paddingBottom={10}>
-          <XStack flex={1} backgroundColor="#f5f5f7" borderRadius={8} paddingHorizontal={10}>
+          <XStack flex={1} backgroundColor={colors.bg.subtle} borderRadius={8} paddingHorizontal={10}>
             <Input flex={1} value={tagDraft} onChangeText={setTagDraft}
               onSubmitEditing={submitTag} placeholder="输入标签后回车"
               backgroundColor="transparent" borderWidth={0}
-              color="#1d1d1f" fontSize={14} height={36}
+              color={colors.text.primary} fontSize={14} height={36}
               autoFocus returnKeyType="done" />
           </XStack>
           <Pressable onPress={submitTag} hitSlop={4}>
-            <Text fontSize={13} color="#b388ff" fontWeight="600">添加</Text>
+            <Text fontSize={13} color={colors.brand.primary} fontWeight="600">添加</Text>
           </Pressable>
         </XStack>
       )}
 
       <XStack alignItems="center" justifyContent="space-between">
-        <Text fontSize={13} color="#666">已选 {count} 项</Text>
+        <Text fontSize={13} color={colors.text.secondary}>已选 {count} 项</Text>
         <XStack gap={18} alignItems="center">
           <Pressable onPress={() => setPanel(panel === 'star' ? null : 'star')} hitSlop={6}>
             <Star size={22}
-              color={panel === 'star' ? '#b388ff' : '#666'} />
+              color={panel === 'star' ? colors.brand.primary : colors.text.secondary} />
           </Pressable>
           <Pressable onPress={() => setPanel(panel === 'tag' ? null : 'tag')} hitSlop={6}>
             <Tag size={22}
-              color={panel === 'tag' ? '#b388ff' : '#666'} />
+              color={panel === 'tag' ? colors.brand.primary : colors.text.secondary} />
           </Pressable>
           <Pressable onPress={confirmTrash} hitSlop={6}>
-            <Trash2 size={22} color="#cc4444" />
+            <Trash2 size={22} color={colors.status.error} />
           </Pressable>
         </XStack>
       </XStack>
@@ -1314,10 +1531,10 @@ function ImportProgressModal({ state, onDismiss }: {
     title = '上传到中转';
     body = (
       <YStack alignItems="center" gap={10} paddingVertical={8}>
-        <Spinner size="large" color="#b388ff" />
-        <Text fontSize={14} color="#444">{state.current} / {state.total}</Text>
+        <Spinner size="large" color={colors.brand.primary} />
+        <Text fontSize={14} color={colors.text.secondary}>{state.current} / {state.total}</Text>
         {state.failed > 0 && (
-          <Text fontSize={12} color="#cc4444">{state.failed} 张上传失败</Text>
+          <Text fontSize={12} color={colors.status.error}>{state.failed} 张上传失败</Text>
         )}
       </YStack>
     );
@@ -1325,9 +1542,9 @@ function ImportProgressModal({ state, onDismiss }: {
     title = '导入到素材库';
     body = (
       <YStack alignItems="center" gap={10} paddingVertical={8}>
-        <Spinner size="large" color="#b388ff" />
-        <Text fontSize={14} color="#444">{state.progress} / {state.uploaded}</Text>
-        <Text fontSize={11} color="#888">桌面端正在写入</Text>
+        <Spinner size="large" color={colors.brand.primary} />
+        <Text fontSize={14} color={colors.text.secondary}>{state.progress} / {state.uploaded}</Text>
+        <Text fontSize={11} color={colors.text.tertiary}>桌面端正在写入</Text>
       </YStack>
     );
   } else {
@@ -1335,8 +1552,8 @@ function ImportProgressModal({ state, onDismiss }: {
     body = (
       <YStack alignItems="center" gap={8} paddingVertical={8}>
         <CircleCheck size={48}
-          color={state.failed === 0 ? '#5cb85c' : '#f7b500'} />
-        <Text fontSize={14} color="#444">
+          color={state.failed === 0 ? colors.status.success : colors.status.warning} />
+        <Text fontSize={14} color={colors.text.secondary}>
           成功 {state.processed} 张{state.failed > 0 ? `,失败 ${state.failed} 张` : ''}
         </Text>
       </YStack>
@@ -1346,18 +1563,18 @@ function ImportProgressModal({ state, onDismiss }: {
   return (
     <Modal visible animationType="fade" transparent onRequestClose={dismissable ? onDismiss : undefined}>
       <Pressable
-        style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.45)',
+        style={{ flex: 1, backgroundColor: colors.overlay.scrimStrong,
                  justifyContent: 'center', alignItems: 'center' }}
         onPress={dismissable ? onDismiss : undefined}
       >
         <Pressable onPress={e => e.stopPropagation()}
-          style={{ width: '78%', backgroundColor: '#fff', borderRadius: 14, padding: 22 }}>
-          <Text fontSize={16} fontWeight="600" color="#1d1d1f" marginBottom={12}
+          style={{ width: '78%', backgroundColor: colors.bg.surface, borderRadius: 14, padding: 22 }}>
+          <Text fontSize={16} fontWeight="600" color={colors.text.primary} marginBottom={12}
             textAlign="center">{title}</Text>
           {body}
           {dismissable && (
             <Pressable onPress={onDismiss} hitSlop={6} style={{ marginTop: 16 }}>
-              <Text fontSize={14} color="#b388ff" fontWeight="600" textAlign="center">关闭</Text>
+              <Text fontSize={14} color={colors.brand.primary} fontWeight="600" textAlign="center">关闭</Text>
             </Pressable>
           )}
         </Pressable>
@@ -1392,23 +1609,23 @@ function FolderNameDialog({ state, onSubmit, onClose }: {
 
   return (
     <Modal visible animationType="fade" transparent onRequestClose={onClose}>
-      <Pressable style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.45)',
+      <Pressable style={{ flex: 1, backgroundColor: colors.overlay.scrimStrong,
                            justifyContent: 'center', alignItems: 'center' }}
         onPress={onClose}>
         <Pressable onPress={e => e.stopPropagation()}
-          style={{ width: '82%', backgroundColor: '#fff', borderRadius: 14, padding: 20 }}>
-          <Text fontSize={16} fontWeight="600" color="#1d1d1f" marginBottom={12}>{title}</Text>
+          style={{ width: '82%', backgroundColor: colors.bg.surface, borderRadius: 14, padding: 20 }}>
+          <Text fontSize={16} fontWeight="600" color={colors.text.primary} marginBottom={12}>{title}</Text>
           <Input value={value} onChangeText={setValue}
             placeholder="文件夹名" autoFocus returnKeyType="done"
             onSubmitEditing={submit}
-            backgroundColor="#f5f5f7" borderWidth={0} borderRadius={8}
-            color="#1d1d1f" fontSize={15} height={40} paddingHorizontal={12} />
+            backgroundColor={colors.bg.subtle} borderWidth={0} borderRadius={8}
+            color={colors.text.primary} fontSize={15} height={40} paddingHorizontal={12} />
           <XStack justifyContent="flex-end" gap={16} marginTop={16}>
             <Pressable onPress={onClose} hitSlop={6}>
-              <Text fontSize={14} color="#999">取消</Text>
+              <Text fontSize={14} color={colors.text.tertiary}>取消</Text>
             </Pressable>
             <Pressable onPress={submit} hitSlop={6}>
-              <Text fontSize={14} color="#b388ff" fontWeight="600">确定</Text>
+              <Text fontSize={14} color={colors.brand.primary} fontWeight="600">确定</Text>
             </Pressable>
           </XStack>
         </Pressable>
@@ -1419,28 +1636,54 @@ function FolderNameDialog({ state, onSubmit, onClose }: {
 
 // --- Detail Modal ---
 //
-// Editorial-atelier redesign: an artist's archive sheet rather than a generic
-// photo-info modal. The body presents the image as a print with its title in
-// large serif italic and its technical metadata as tracked uppercase monospace,
-// like a contact sheet caption. Tags shed their chip fills for plain text with
-// a single lavender underline; the rating is small and lavender-filled rather
-// than gold-star material; actions are italic text affordances instead of
-// solid pill buttons. Lavender (#b388ff, Nephele brand) is used sparingly so
-// it actually reads as an accent.
+// Aligned with the main gallery surface: clean white sheet, system sans
+// typography, lucide icons, token-based color. Replaces an earlier
+// editorial / atelier look (serif italic, monospace section labels, warm
+// paper background) — kept here only as a comment for design intent
+// archaeology, in case we want to revisit a more distinct voice later.
 
-function DetailModal({ item, thumb, onClose, onOpenLightbox, onUpdateItem, onTrash,
-                      onPoseSearch }: {
-  item: LibraryItem | null; thumb?: string;
+function DetailModal({ item, items, getThumb, onClose, onOpenLightbox,
+                      onIndexChange, onUpdateItem, onTrash, onPoseSearch }: {
+  item: LibraryItem | null;
+  items: LibraryItem[];
+  getThumb: (id: string) => string | undefined;
   onClose: () => void;
   onOpenLightbox: (item: LibraryItem, thumbRef: AnimatedRef<any>) => void;
+  // Fired when the user swipes the hero pager to a different page. Parent
+  // updates `item` to keep the modal + lightbox in lock-step.
+  onIndexChange: (i: number) => void;
   onUpdateItem?: (itemId: string, fields: Partial<LibraryItem>) => void;
   onTrash?: (itemId: string) => void;
   onPoseSearch?: (itemId: string) => void;
 }) {
   // Ref to the big-image wrapper. Measured by Lightbox.openLightbox in the
-  // UI thread to derive the hero animation start rect.
+  // UI thread to derive the hero animation start rect. Always rebinds to
+  // whichever page is currently active in the pager.
   const thumbRef = useAnimatedRef<Animated.View>();
   const insets = useSafeAreaInsets();
+  const pagerRef = useRef<PagerView | null>(null);
+
+  // currentIndex is derived from item.id rather than tracked separately so
+  // there's no two-source-of-truth race when `item` is updated from outside
+  // (lightbox close, external selection, etc.).
+  const currentIndex = item ? items.findIndex(i => i.id === item.id) : -1;
+  // Pager's `initialPage` only takes effect on first mount; reuse the index
+  // captured at mount time so re-renders don't re-trigger any odd jumps.
+  const initialIndexRef = useRef(currentIndex >= 0 ? currentIndex : 0);
+  // Tracks the pager's last-known native page. Used to detect external item
+  // changes (currentIndex changed but pager didn't fire onPageSelected) and
+  // call setPageWithoutAnimation. Pager-initiated changes update this ref in
+  // onPageSelected BEFORE React re-renders so the effect below is a no-op.
+  const pagerPageRef = useRef(initialIndexRef.current);
+
+  // Sync external item changes to the pager. Self-initiated swipes are
+  // already in sync by the time the effect runs, so they're a no-op.
+  useEffect(() => {
+    if (currentIndex < 0) return;
+    if (pagerPageRef.current === currentIndex) return;
+    pagerPageRef.current = currentIndex;
+    pagerRef.current?.setPageWithoutAnimation(currentIndex);
+  }, [currentIndex]);
 
   const [annotationDraft, setAnnotationDraft] = useState('');
   const [tagDraft, setTagDraft] = useState('');
@@ -1484,283 +1727,300 @@ function DetailModal({ item, thumb, onClose, onOpenLightbox, onUpdateItem, onTra
   // Filename for display drops the extension — the ext appears separately in
   // the metadata caption below, so the title reads cleaner as a "work title".
   const displayName = item.name.replace(/\.[^.]+$/, '');
-  const ar = item.width && item.height ? item.width / item.height : 1;
-  const imgW = SCREEN_W - 48;            // 24px gutter each side
-  const imgH = Math.min(imgW / ar, 480);
+  const imgW = SCREEN_W - 40;            // 20px gutter each side
+  // Image cap so meta + actions are visible without scroll on first open.
+  // Pager has fixed height = cap; each page's image fits within via its
+  // own aspect-correct box centered vertically inside the page.
+  const imgHCap = Math.min(SCREEN_H * 0.42, 400);
+  const star = item.star || 0;
 
   return (
     <Modal visible animationType="slide" transparent onRequestClose={onClose}>
-      <Pressable style={DS.scrim} onPress={onClose}>
+      {/* RN touch-responder fix: outer is a plain View (not a Pressable) so
+          gesture events inside the sheet propagate to the ScrollView. The
+          backdrop is a sibling Pressable; sheet sits on top via render order. */}
+      <View style={{ flex: 1 }}>
         <Pressable
-          style={[DS.sheet, { paddingBottom: insets.bottom + 16 }]}
-          onPress={e => e.stopPropagation()}
+          style={{ ...StyleSheet.absoluteFillObject, backgroundColor: colors.overlay.scrim }}
+          onPress={onClose}
+        />
+        <View
+          style={{
+            position: 'absolute',
+            bottom: 0, left: 0, right: 0,
+            backgroundColor: colors.bg.canvas,
+            borderTopLeftRadius: 20,
+            borderTopRightRadius: 20,
+            maxHeight: '92%',
+            overflow: 'hidden',
+          }}
         >
-          {/* Drag handle — slim, paper-cream */}
-          <YStack alignItems="center" paddingTop={12} paddingBottom={4}>
-            <YStack style={DS.handle} />
+          {/* Drag handle */}
+          <YStack alignItems="center" paddingTop={10} paddingBottom={6}>
+            <YStack width={36} height={4} borderRadius={2}
+              backgroundColor={colors.border.default} />
           </YStack>
 
-          <ScrollView contentContainerStyle={{ paddingHorizontal: 24, paddingTop: 12, paddingBottom: 8 }}>
-            {/* Image — sits in a quiet warm-gray frame */}
-            <Pressable onPress={openLightbox}>
-              <Animated.View
-                ref={thumbRef}
-                collapsable={false}
-                style={[DS.imageFrame, { width: imgW, height: imgH }]}
+          {/* Hero pager — sits outside the ScrollView so it stays anchored
+              at the top while metadata scrolls underneath. Each page renders
+              one item's image; only the active page (and its ±1 neighbors)
+              actually mount the Image to keep large libraries cheap. The
+              active page wears thumbRef so the lightbox hero animation can
+              still measure from the right view after a swipe. */}
+          <PagerView
+            ref={pagerRef}
+            style={{ width: SCREEN_W, height: imgHCap, marginTop: 4 }}
+            initialPage={initialIndexRef.current}
+            onPageSelected={e => {
+              const pos = e.nativeEvent.position;
+              pagerPageRef.current = pos;
+              onIndexChange(pos);
+            }}
+          >
+            {items.map((it, i) => {
+              const isActive = i === currentIndex;
+              const inWindow = Math.abs(i - currentIndex) <= 1;
+              const arIt = it.width && it.height ? it.width / it.height : 1;
+              const hIt = Math.min(imgW / arIt, imgHCap);
+              const thumbIt = getThumb(it.id);
+              return (
+                <View key={it.id} style={{ justifyContent: 'center', alignItems: 'center' }}>
+                  {inWindow && (
+                    <Pressable onPress={isActive ? openLightbox : undefined}>
+                      <Animated.View
+                        ref={isActive ? thumbRef : undefined}
+                        collapsable={false}
+                        style={{
+                          width: imgW - 8, height: hIt,
+                          backgroundColor: colors.bg.thumb,
+                          borderRadius: 12,
+                          overflow: 'hidden',
+                        }}
+                      >
+                        {thumbIt ? (
+                          <Image source={thumbIt}
+                            style={{ width: imgW - 8, height: hIt }}
+                            contentFit="contain"
+                            cachePolicy="memory-disk"
+                            placeholder={it.blurhash ? { blurhash: it.blurhash } : undefined}
+                            placeholderContentFit="contain"
+                            transition={150} />
+                        ) : (
+                          <YStack flex={1} justifyContent="center" alignItems="center">
+                            <Spinner size="small" color={colors.brand.primary} />
+                          </YStack>
+                        )}
+                      </Animated.View>
+                    </Pressable>
+                  )}
+                </View>
+              );
+            })}
+          </PagerView>
+
+          {/* Metadata — scrolls vertically below the hero pager. Each block
+              has its own visual idiom matched to the data type (hero
+              typography / inline meta strip / chip group / annotation accent
+              / icon-led link). Different idioms create hierarchy that 4
+              same-shaped Field rows can't. */}
+          <ScrollView
+            style={{ flexShrink: 1 }}
+            contentContainerStyle={{ paddingHorizontal: 24, paddingTop: 16, paddingBottom: 24 }}
+            keyboardShouldPersistTaps="handled"
+          >
+            {/* Hero typography — filename dominates, meta + rating ride
+                along on a single small caption row to free vertical space. */}
+            <YStack gap={8}>
+              <Text
+                color={colors.text.primary}
+                fontSize={24}
+                fontWeight="600"
+                lineHeight={30}
+                numberOfLines={3}
               >
-                {thumb
-                  ? <Image source={thumb} style={{ width: imgW, height: imgH }} contentFit="contain"
-                      cachePolicy="memory-disk"
-                      placeholder={item.blurhash ? { blurhash: item.blurhash } : undefined}
-                      placeholderContentFit="contain"
-                      transition={150} />
-                  : <YStack flex={1} justifyContent="center" alignItems="center">
-                      <Spinner size="small" color="#b388ff" />
-                    </YStack>}
-              </Animated.View>
-            </Pressable>
+                {displayName}
+              </Text>
+              <XStack alignItems="center" gap={10} flexWrap="wrap">
+                <Text color={colors.text.tertiary} fontSize={12}>
+                  {(item.ext || '').toUpperCase()} · {item.width} × {item.height} · {fmtSize(item.size)}
+                </Text>
+                {star > 0 && (
+                  <XStack alignItems="center" gap={3}>
+                    <Star size={12} color={colors.brand.primary} fill={colors.brand.primary} />
+                    <Text color={colors.brand.primary} fontSize={12} fontWeight="600">{star}</Text>
+                  </XStack>
+                )}
+              </XStack>
+            </YStack>
 
-            {/* Italic "view original" — small caption sitting just under the print */}
-            <XStack justifyContent="center" marginTop={10} marginBottom={24}>
-              <Pressable onPress={openLightbox} hitSlop={8}>
-                <Text style={DS.expandHint}>view original ─ swipe to navigate</Text>
-              </Pressable>
-            </XStack>
+            {/* Rating row — interactive stars without a label. The stars
+                themselves communicate "rating", and putting them right after
+                the meta caption ties them to the file identity. */}
+            {onUpdateItem && (
+              <XStack alignItems="center" gap={8} marginTop={22}>
+                {[1, 2, 3, 4, 5].map(i => {
+                  const filled = i <= star;
+                  return (
+                    <Pressable key={i} hitSlop={6} onPress={() => setStar(i)}>
+                      <Star size={24}
+                        color={filled ? colors.brand.primary : colors.text.faint}
+                        fill={filled ? colors.brand.primary : 'none'} />
+                    </Pressable>
+                  );
+                })}
+              </XStack>
+            )}
 
-            {/* Title — large serif italic */}
-            <Text style={DS.title} numberOfLines={3}>{displayName}</Text>
-
-            {/* Metadata — tracked uppercase mono, like a print's archival stamp */}
-            <Text style={DS.meta}>
-              {(item.ext || '').toUpperCase()}   ·   {item.width} × {item.height}   ·   {fmtSize(item.size)}
-            </Text>
-
-            <YStack style={DS.hairline} marginTop={20} marginBottom={24} />
-
-            {/* Rating */}
-            <Text style={DS.sectionLabel}>RATING</Text>
-            <XStack alignItems="center" gap={6} marginBottom={28}>
-              {[1, 2, 3, 4, 5].map(i => {
-                const filled = i <= (item.star || 0);
-                return (
-                  <Pressable key={i} hitSlop={8}
-                    onPress={onUpdateItem ? () => setStar(i) : undefined}>
-                    <Star
-                      size={18}
-                      color={filled ? '#b388ff' : '#d2cdc1'}
-                      fill={filled ? '#b388ff' : 'none'} />
-                  </Pressable>
-                );
-              })}
-              {(item.star || 0) === 0 && (
-                <Text style={[DS.placeholder, { marginLeft: 8 }]}>—</Text>
-              )}
-            </XStack>
-
-            {/* Tags */}
-            <Text style={DS.sectionLabel}>TAGS</Text>
-            <XStack flexWrap="wrap" gap={14} rowGap={12} marginBottom={28} alignItems="center">
-              {item.tags.map(t => (
-                <Pressable key={t}
-                  onPress={onUpdateItem ? () => removeTag(t) : undefined}
-                  hitSlop={4}
-                >
-                  <Text style={DS.tag}>{t}</Text>
-                </Pressable>
-              ))}
+            {/* Tags — chips row, add input on its own row so the input has
+                room to breathe (cramming a tiny input at the end of a wrap
+                row read as "shrunk and afterthought"). */}
+            <YStack marginTop={onUpdateItem ? 20 : 24} gap={10}>
+              {item.tags.length > 0 ? (
+                <XStack flexWrap="wrap" gap={6} rowGap={8} alignItems="center">
+                  {item.tags.map(t => (
+                    <Pressable key={t}
+                      onPress={onUpdateItem ? () => removeTag(t) : undefined}
+                      hitSlop={4}
+                    >
+                      <XStack backgroundColor={colors.brand.soft}
+                        borderRadius={12} paddingHorizontal={10} paddingVertical={4}
+                        alignItems="center" gap={5}>
+                        <Text fontSize={13} color={colors.brand.primary}>{t}</Text>
+                        {onUpdateItem && <X size={12} color={colors.brand.primary} />}
+                      </XStack>
+                    </Pressable>
+                  ))}
+                </XStack>
+              ) : !onUpdateItem ? (
+                <Text color={colors.text.muted} fontSize={13}>暂无标签</Text>
+              ) : null}
               {onUpdateItem && (
-                <XStack alignItems="center" gap={4}>
-                  <Text style={DS.tagAdd}>+</Text>
+                <XStack
+                  backgroundColor={colors.bg.subtle}
+                  borderRadius={12}
+                  paddingHorizontal={12}
+                  alignItems="center"
+                  gap={8}
+                  height={36}
+                >
+                  <Plus size={14} color={colors.text.tertiary} />
                   <Input
+                    flex={1}
                     value={tagDraft}
                     onChangeText={setTagDraft}
                     onSubmitEditing={addTag}
-                    placeholder="add"
-                    placeholderTextColor={'#bcb6aa' as any}
+                    placeholder="添加标签后回车"
+                    placeholderTextColor={colors.text.muted as any}
                     backgroundColor="transparent" borderWidth={0}
-                    color="#1c1a17" fontSize={14}
-                    height={22} minWidth={56} paddingHorizontal={0} paddingVertical={0}
-                    returnKeyType="done" />
+                    color={colors.text.primary} fontSize={13}
+                    height={36}
+                    paddingHorizontal={0}
+                    returnKeyType="done"
+                  />
                 </XStack>
-              )}
-              {item.tags.length === 0 && !onUpdateItem && (
-                <Text style={DS.placeholder}>—</Text>
-              )}
-            </XStack>
-
-            {/* Notes / annotation */}
-            <Text style={DS.sectionLabel}>NOTES</Text>
-            <YStack marginBottom={28}>
-              {onUpdateItem ? (
-                <Input
-                  value={annotationDraft}
-                  onChangeText={setAnnotationDraft}
-                  onBlur={commitAnnotation}
-                  placeholder="—"
-                  placeholderTextColor={'#bcb6aa' as any}
-                  multiline
-                  backgroundColor="transparent" borderWidth={0}
-                  color="#3a342c" fontSize={14}
-                  minHeight={28}
-                  paddingHorizontal={0} paddingVertical={2}
-                />
-              ) : (
-                item.annotation
-                  ? <Text style={DS.body}>{item.annotation}</Text>
-                  : <Text style={DS.placeholder}>—</Text>
               )}
             </YStack>
 
-            {/* Source URL — when known, rendered as a quiet violet mono trace */}
-            {item.url ? (
-              <>
-                <Text style={DS.sectionLabel}>SOURCE</Text>
-                <Text style={DS.url} numberOfLines={2}>{item.url}</Text>
-                <YStack height={28} />
-              </>
-            ) : null}
-
-            <YStack style={DS.hairline} />
-
-            {/* Action row — italic text affordances; left = ops on this work,
-                right = dismiss. Delete shows an Alert before destructive call. */}
-            <XStack justifyContent="space-between" alignItems="center"
-              paddingTop={20} paddingBottom={6}
-            >
-              <XStack gap={24} alignItems="center">
-                {onPoseSearch && (
-                  <Pressable onPress={() => onPoseSearch(item.id)} hitSlop={8}>
-                    <Text style={DS.action}>＊ pose search</Text>
-                  </Pressable>
-                )}
-                {onTrash && (
-                  <Pressable hitSlop={8}
-                    onPress={() => Alert.alert('删除该图片', '将移入回收站', [
-                      { text: '取消', style: 'cancel' },
-                      { text: '删除', style: 'destructive', onPress: () => onTrash(item.id) },
-                    ])}
-                  >
-                    <Text style={DS.actionDanger}>× delete</Text>
-                  </Pressable>
-                )}
-              </XStack>
-              <Pressable onPress={onClose} hitSlop={8}>
-                <Text style={DS.actionClose}>close</Text>
-              </Pressable>
+            {/* Notes — annotation accent (margin-note idiom). */}
+            <XStack alignItems="stretch" minHeight={48} marginTop={24}>
+              <YStack
+                width={2}
+                backgroundColor={colors.brand.primary}
+                opacity={0.35}
+                borderRadius={1}
+                marginRight={14}
+              />
+              {onUpdateItem ? (
+                <Input
+                  flex={1}
+                  value={annotationDraft}
+                  onChangeText={setAnnotationDraft}
+                  onBlur={commitAnnotation}
+                  placeholder="写点什么…"
+                  placeholderTextColor={colors.text.muted as any}
+                  multiline
+                  backgroundColor="transparent"
+                  borderWidth={0}
+                  color={colors.text.primary}
+                  fontSize={14}
+                  lineHeight={22}
+                  paddingHorizontal={0}
+                  paddingVertical={2}
+                  textAlignVertical="top"
+                />
+              ) : item.annotation ? (
+                <Text flex={1} color={colors.text.primary} fontSize={14} lineHeight={22}>
+                  {item.annotation}
+                </Text>
+              ) : (
+                <Text flex={1} color={colors.text.muted} fontSize={14} lineHeight={22}>
+                  尚未添加备注
+                </Text>
+              )}
             </XStack>
+
+            {/* Source URL — icon-led inline, no label. The link icon both
+                identifies the row's purpose and gives the URL a left anchor
+                so long strings wrap cleanly. */}
+            {item.url ? (
+              <XStack alignItems="flex-start" gap={10} marginTop={22}>
+                <Link2 size={14} color={colors.text.tertiary} style={{ marginTop: 4 }} />
+                <Text
+                  flex={1}
+                  color={colors.brand.primary}
+                  fontSize={13}
+                  lineHeight={20}
+                  numberOfLines={2}
+                >
+                  {item.url}
+                </Text>
+              </XStack>
+            ) : null}
           </ScrollView>
-        </Pressable>
-      </Pressable>
+
+          {/* Fixed footer — always reachable regardless of scroll position.
+              Sits on top of the safe-area bottom so destructive actions
+              don't disappear behind gesture bars. */}
+          <XStack
+            paddingHorizontal={20}
+            paddingTop={12}
+            paddingBottom={insets.bottom + 12}
+            backgroundColor={colors.bg.canvas}
+            borderTopWidth={1}
+            borderTopColor={colors.border.hairline}
+            justifyContent="space-between"
+            alignItems="center"
+          >
+            <XStack gap={20} alignItems="center">
+              {onPoseSearch && (
+                <Pressable onPress={() => onPoseSearch(item.id)} hitSlop={8}>
+                  <XStack alignItems="center" gap={6}>
+                    <Crosshair size={18} color={colors.text.secondary} />
+                    <Text fontSize={14} color={colors.text.secondary}>姿势搜索</Text>
+                  </XStack>
+                </Pressable>
+              )}
+              {onTrash && (
+                <Pressable hitSlop={8}
+                  onPress={() => Alert.alert('删除该图片', '将移入回收站', [
+                    { text: '取消', style: 'cancel' },
+                    { text: '删除', style: 'destructive', onPress: () => onTrash(item.id) },
+                  ])}
+                >
+                  <XStack alignItems="center" gap={6}>
+                    <Trash2 size={18} color={colors.status.danger} />
+                    <Text fontSize={14} color={colors.status.danger}>删除</Text>
+                  </XStack>
+                </Pressable>
+              )}
+            </XStack>
+            <Pressable onPress={onClose} hitSlop={8}>
+              <Text fontSize={14} color={colors.text.secondary}>关闭</Text>
+            </Pressable>
+          </XStack>
+        </View>
+      </View>
     </Modal>
   );
 }
-
-
-// --- DetailModal styles (Editorial atelier) ---
-// Typography pairs platform serif (Georgia on iOS, Noto Serif on Android) at
-// italic for "voice" elements (title, hints, actions) with platform monospace
-// (Menlo / monospace) for archival metadata. Body falls through to Tamagui /
-// system sans. Lavender #b388ff is the only colored accent and earns its
-// presence by appearing only on active state.
-
-const DS = StyleSheet.create({
-  scrim: { flex: 1, backgroundColor: 'rgba(28, 26, 23, 0.45)' },
-  sheet: {
-    position: 'absolute',
-    bottom: 0, left: 0, right: 0,
-    backgroundColor: '#fcfaf6',
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    maxHeight: '92%',
-  },
-  handle: {
-    width: 48, height: 3,
-    borderRadius: 1.5,
-    backgroundColor: '#d6d0c4',
-  },
-  imageFrame: {
-    backgroundColor: '#efebe3',
-    borderRadius: 4,
-    overflow: 'hidden',
-    alignSelf: 'center',
-  },
-  expandHint: {
-    fontFamily: Platform.select({ ios: 'Georgia', android: 'serif' }),
-    fontSize: 12,
-    fontStyle: 'italic',
-    color: '#8a8278',
-    letterSpacing: 0.2,
-  },
-  title: {
-    fontFamily: Platform.select({ ios: 'Georgia', android: 'serif' }),
-    fontSize: 28,
-    fontStyle: 'italic',
-    lineHeight: 34,
-    color: '#1c1a17',
-    marginBottom: 8,
-  },
-  meta: {
-    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace' }),
-    fontSize: 10,
-    color: '#8a8278',
-    letterSpacing: 1.4,
-  },
-  sectionLabel: {
-    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace' }),
-    fontSize: 9,
-    color: '#a8a195',
-    letterSpacing: 2.4,
-    marginBottom: 14,
-  },
-  hairline: {
-    height: 1,
-    backgroundColor: '#e6e1d8',
-  },
-  body: {
-    fontSize: 14,
-    color: '#3a342c',
-    lineHeight: 22,
-  },
-  placeholder: {
-    fontFamily: Platform.select({ ios: 'Georgia', android: 'serif' }),
-    fontSize: 14,
-    color: '#bcb6aa',
-    fontStyle: 'italic',
-  },
-  tag: {
-    fontSize: 14,
-    color: '#1c1a17',
-    textDecorationLine: 'underline',
-    textDecorationColor: '#b388ff',
-  },
-  tagAdd: {
-    fontSize: 14,
-    color: '#b388ff',
-  },
-  url: {
-    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace' }),
-    fontSize: 11,
-    color: '#7a73a5',
-    letterSpacing: 0.3,
-    lineHeight: 18,
-  },
-  action: {
-    fontFamily: Platform.select({ ios: 'Georgia', android: 'serif' }),
-    fontSize: 15,
-    color: '#1c1a17',
-    fontStyle: 'italic',
-  },
-  actionDanger: {
-    fontFamily: Platform.select({ ios: 'Georgia', android: 'serif' }),
-    fontSize: 15,
-    color: '#9a3a3a',
-    fontStyle: 'italic',
-  },
-  actionClose: {
-    fontFamily: Platform.select({ ios: 'Georgia', android: 'serif' }),
-    fontSize: 15,
-    color: '#b388ff',
-    fontStyle: 'italic',
-  },
-});
 

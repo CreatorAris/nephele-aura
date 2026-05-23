@@ -23,6 +23,11 @@ export type Lightbox = {
   id: string;
   images: ImageSource[];
   index: number;
+  // Invoked once when the lightbox closes (any path: tap, dismiss swipe, back
+  // gesture). Receives the last-active index — callers use this to mirror the
+  // lightbox's pager position into their own state (e.g. Aura's DetailModal
+  // jumps to whatever image the user landed on after swiping).
+  onClose?: (finalIndex: number) => void;
 };
 
 const LightboxContext = createContext<{
@@ -35,9 +40,14 @@ LightboxContext.displayName = 'LightboxContext';
 const LightboxControlContext = createContext<{
   openLightbox: (lightbox: Omit<Lightbox, 'id'>) => void;
   closeLightbox: () => boolean;
+  // Called by the pager whenever the active page changes so closeLightbox can
+  // pass the final index to onClose. Plain function, not async — keep it cheap
+  // since it fires on every swipe.
+  setLightboxIndex: (i: number) => void;
 }>({
   openLightbox: () => {},
   closeLightbox: () => false,
+  setLightboxIndex: () => {},
 });
 LightboxControlContext.displayName = 'LightboxControlContext';
 
@@ -53,12 +63,21 @@ export function LightboxProvider({ children }: React.PropsWithChildren<{}>) {
   // "wasActive" without re-creating the callback on every state change.
   const activeRef = useRef(activeLightbox);
   activeRef.current = activeLightbox;
+  // Tracks the pager's currently-active page. Updated from ImagePager on every
+  // onPageSelected. Read by closeLightbox to feed onClose(finalIndex).
+  const currentIndexRef = useRef<number>(0);
+  // Guard so onClose only fires once per lightbox session even if closeLightbox
+  // is called twice (e.g. swipe-dismiss races with the Modal back-gesture).
+  const calledOnCloseRef = useRef<boolean>(false);
 
   const doOpen = useCallback((lightbox: Omit<Lightbox, 'id'>) => {
     setActiveLightbox(prev => {
       // Ignore duplicate open requests; user must close the active one first.
       if (prev) return prev;
-      return { ...lightbox, id: nextLightboxId() };
+      const next = { ...lightbox, id: nextLightboxId() };
+      currentIndexRef.current = next.index;
+      calledOnCloseRef.current = false;
+      return next;
     });
   }, []);
 
@@ -86,14 +105,26 @@ export function LightboxProvider({ children }: React.PropsWithChildren<{}>) {
     }
   }, [doOpen]);
 
+  const setLightboxIndex = useCallback((i: number) => {
+    currentIndexRef.current = i;
+  }, []);
+
   const closeLightbox = useCallback(() => {
-    const wasActive = !!activeRef.current;
+    const active = activeRef.current;
+    const wasActive = !!active;
+    if (active?.onClose && !calledOnCloseRef.current) {
+      calledOnCloseRef.current = true;
+      active.onClose(currentIndexRef.current);
+    }
     setActiveLightbox(null);
     return wasActive;
   }, []);
 
   const state = useMemo(() => ({ activeLightbox }), [activeLightbox]);
-  const methods = useMemo(() => ({ openLightbox, closeLightbox }), [openLightbox, closeLightbox]);
+  const methods = useMemo(
+    () => ({ openLightbox, closeLightbox, setLightboxIndex }),
+    [openLightbox, closeLightbox, setLightboxIndex],
+  );
 
   return (
     <LightboxContext.Provider value={state}>

@@ -1,53 +1,53 @@
 // Single source of truth for color values used across screens.
-// Mirrors the system Aura's UI implicitly uses today — extracted from
-// scattered hex literals so future tweaks (e.g. a darker text-primary, a
-// softer focus ring) land in one place instead of 30+ touch sites.
 //
-// Brand colors track the desktop app's #b388ff Nephele purple. Status colors
-// (danger / warning / success) match the existing values to keep the
-// migration purely structural — token names ≠ new design decisions.
+// DARK THEME ("midnight" / "Astral Night") — values copied from the desktop
+// app's QML palette (gui/qml/core/Theme.qml, "midnight"). Deep violet-blue
+// base (#1A1438) with the locked brand purple (#CEACE0) injected at higher
+// elevation and as the interactive accent. Token names are unchanged from the
+// previous light palette so the 80+ existing `colors.*` call sites keep
+// working — only the values flipped.
 
 export const colors = {
   text: {
-    primary: '#1d1d1f',   // titles, large numbers, dominant text
-    secondary: '#666',     // body text, button labels
-    tertiary: '#999',      // helpers, captions, inactive states
-    muted: '#bbb',         // placeholders, disabled
-    faint: '#ccc',         // pre-disabled hints, dividers in dense rows
+    primary: '#F5F2FF',    // titles, large numbers, dominant text (off-white violet)
+    secondary: '#C0B5DC',  // body text, button labels
+    tertiary: '#8278A0',   // helpers, captions, inactive states
+    muted: '#7A70A0',      // placeholders, disabled (≥4.5:1 on canvas)
+    faint: '#4A4068',      // pre-disabled hints, dividers in dense rows
   },
 
   bg: {
-    canvas: '#fafafa',     // screen background
-    surface: '#fff',       // cards, sheets, raised regions
-    subtle: '#f5f5f7',     // input fields, low-contrast fills
-    skeleton: '#eaeaea',   // loading placeholders
-    thumb: '#f0f0f0',      // image placeholder while thumb loads
+    canvas: '#1A1438',     // screen background — deep violet-blue base
+    surface: '#2E2A48',    // cards, sheets, raised regions (opaque violet)
+    subtle: '#241E3C',     // input fields, low-contrast fills
+    skeleton: '#2A2548',   // loading placeholders
+    thumb: '#252240',      // image placeholder while thumb loads
   },
 
   border: {
-    default: '#ececec',    // regular borders (search bar, chips at rest)
-    subtle: '#f0f0f0',     // very light dividers between rows
-    hairline: '#f2f2f2',   // sheet section dividers
-    focus: '#b388ff',      // focused / active borders
+    default: '#3A3458',    // regular borders (search bar, chips at rest)
+    subtle: '#2E2A4E',     // very light dividers between rows
+    hairline: '#2A2548',   // sheet section dividers
+    focus: '#CEACE0',      // focused / active borders (brand purple)
   },
 
   brand: {
-    primary: '#b388ff',    // Nephele purple — interactive accent
-    soft: '#f0e6ff',       // active chip background
-    softer: '#f8f0ff',     // active row background (folder picker selection)
-    accent: '#d4c4f0',     // empty-state icon tint
+    primary: '#CEACE0',    // Nephele purple — interactive accent (locked across themes)
+    soft: '#4A3580',       // active chip background — visible step above surface #2E2A48
+    softer: '#3D2A6A',     // active row background (folder picker selection)
+    accent: '#B5C8F7',     // empty-state icon tint (periwinkle)
   },
 
   status: {
-    danger: '#FF383C',     // logout / destructive
-    error: '#cc4444',      // inline error text
-    warning: '#f7b500',    // star rating fill, partial success
-    success: '#5cb85c',    // fully successful state
+    danger: '#EC8E94',     // logout / destructive
+    error: '#E8959A',      // inline error text
+    warning: '#F5C878',    // star rating fill, partial success
+    success: '#7EC8D9',    // fully successful state (teal)
   },
 
   overlay: {
-    scrim: 'rgba(0,0,0,0.4)',           // sheet backdrop
-    scrimStrong: 'rgba(0,0,0,0.45)',    // modal backdrop
-    onImage: 'rgba(255,255,255,0.85)',  // selection checkbox over image
+    scrim: 'rgba(0,0,0,0.5)',            // sheet backdrop
+    scrimStrong: 'rgba(0,0,0,0.6)',      // modal backdrop
+    onImage: 'rgba(255,255,255,0.9)',    // selection checkbox over image
   },
 } as const;

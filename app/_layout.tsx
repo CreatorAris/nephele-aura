@@ -11,14 +11,14 @@ export default function RootLayout() {
     // root of the app tree. The new Lightbox uses gesture-handler for
     // pinch/pan/dismiss; without this, gestures silently no-op on Android.
     <GestureHandlerRootView style={{ flex: 1 }}>
-      <TamaguiProvider config={config} defaultTheme="light">
-        <Theme name="light">
-          <StatusBar style="dark" />
+      <TamaguiProvider config={config} defaultTheme="dark_nephele">
+        <Theme name="dark_nephele">
+          <StatusBar style="light" />
           <LightboxProvider>
             <Stack
               screenOptions={{
                 headerShown: false,
-                contentStyle: { backgroundColor: '#fafafa' },
+                contentStyle: { backgroundColor: '#1A1438' },
               }}
             >
               <Stack.Screen name="(tabs)" />

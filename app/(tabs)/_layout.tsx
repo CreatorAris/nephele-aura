@@ -1,5 +1,6 @@
 import { Tabs, useRouter } from 'expo-router';
 import { Images, User } from 'lucide-react-native';
+import { FloatingTabBar } from '../../components/FloatingTabBar';
 import { useEffect, useRef } from 'react';
 import { BackHandler, ToastAndroid, Platform } from 'react-native';
 import { useNavigation } from 'expo-router';
@@ -56,19 +57,8 @@ export default function TabLayout() {
 
   return (
     <Tabs
-      screenOptions={{
-        headerShown: false,
-        tabBarStyle: {
-          backgroundColor: '#ffffff',
-          borderTopColor: '#f0f0f0',
-          borderTopWidth: 0.5,
-          height: 56,
-          paddingBottom: 4,
-        },
-        tabBarActiveTintColor: '#b388ff',
-        tabBarInactiveTintColor: '#999999',
-        tabBarLabelStyle: { fontSize: 11 },
-      }}
+      screenOptions={{ headerShown: false }}
+      tabBar={(props) => <FloatingTabBar {...props} />}
     >
       <Tabs.Screen
         name="index"

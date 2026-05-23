@@ -16,6 +16,22 @@ export type UserInfo = {
   avatar?: string;
 };
 
+// Backend uses legacy `credits` naming for what the user-facing copy calls
+// 云晶 (Nepheline). Field names are preserved as-is to match Worker code;
+// translation to "云晶" happens in the UI layer.
+export type LicenseStatus = {
+  valid: boolean;
+  tier: string;                    // "free" | "alpha" | "event" | paid tier name
+  status?: string;                 // "active" | "expired" | ...
+  expires_at?: string;             // ISO datetime
+  credits_remaining?: number;      // annual Nepheline pool remaining
+  credits_limit?: number;          // annual Nepheline pool total (typically 50000)
+  purchased_credits?: number;      // purchased Nepheline balance (never expires)
+  total_remaining?: number;        // credits_remaining + purchased_credits
+  event_name?: string;             // populated when tier === "event"
+  event_expires?: string;
+};
+
 type Result = {
   success: boolean;
   message: string;
@@ -162,6 +178,71 @@ export async function logout(): Promise<void> {
     STORAGE_KEYS.refreshToken,
     STORAGE_KEYS.userInfo,
   ]);
+}
+
+/**
+ * Read membership tier + Nepheline (云晶) balance via /v1/license/check.
+ * Mobile clients omit X-Device-Fp on purpose — that endpoint will skip the
+ * device-binding write path when deviceFp is empty, so this call stays
+ * read-only (no risk of accidentally binding the phone as a paid device).
+ */
+export async function getLicenseStatus(): Promise<LicenseStatus | null> {
+  const token = await getToken();
+  if (!token) return null;
+  try {
+    const res = await fetch(`${API_BASE}/v1/license/check`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'X-Client-Type': CLIENT_TYPE,
+      },
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as LicenseStatus;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Exchange a desktop-issued pairing token for a full JWT + refresh token.
+ * Desktop generates the token via /auth/pairing/create, renders it as a QR;
+ * we scan the QR, POST here, and land in (tabs) authenticated as the same
+ * user the desktop is logged in as. Same response shape as /auth/verify-code.
+ */
+export async function exchangePairingToken(token: string): Promise<LoginResult> {
+  try {
+    const res = await fetch(`${API_BASE}/auth/pairing/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Client-Type': CLIENT_TYPE },
+      body: JSON.stringify({ token }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      const code = data.code || '';
+      const message =
+        code === 'PAIRING_EXPIRED' ? '二维码已过期，请刷新桌面端' :
+        code === 'PAIRING_CLAIMED' ? '二维码已被使用，请重新生成' :
+        (data.error || '配对失败');
+      return { success: false, message };
+    }
+    const accessToken = data.token;
+    if (!accessToken) return { success: false, message: '配对异常，未获取到令牌' };
+
+    const user: UserInfo = {
+      uid: data.user_id || '',
+      email: data.email || '',
+      nickname: (data.email || '').split('@')[0] || '架构师',
+    };
+    await AsyncStorage.multiSet([
+      [STORAGE_KEYS.accessToken, accessToken],
+      [STORAGE_KEYS.refreshToken, data.refresh_token || ''],
+      [STORAGE_KEYS.userInfo, JSON.stringify(user)],
+    ]);
+    return { success: true, message: '登录成功', user };
+  } catch (e) {
+    return { success: false, message: '网络错误，请检查连接' };
+  }
 }
 
 export async function refreshAccessToken(): Promise<boolean> {

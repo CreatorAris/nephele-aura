@@ -33,7 +33,27 @@
     "plugins": [
       "expo-router",
       "expo-font",
-      "expo-asset"
+      "expo-asset",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Nephele 需要相册权限以选图导入到桌面素材库。",
+          "cameraPermission": "Nephele 需要相机权限以拍照导入到桌面素材库。"
+        }
+      ],
+      [
+        "expo-share-intent",
+        {
+          "androidIntentFilters": ["image/*"],
+          "androidMultiIntentFilters": ["image/*"]
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Nephele 需要相机权限以扫描桌面二维码登录。"
+        }
+      ]
     ]
   }
 }

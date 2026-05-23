@@ -5,6 +5,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useState, useEffect, useRef } from 'react';
 import { router } from 'expo-router';
 import { sendCode, verifyCode } from '../../utils/auth';
+import { colors } from '../../theme/colors';
 
 type Step = 'email' | 'code';
 
@@ -82,10 +83,10 @@ export default function LoginScreen() {
           {/* Logo */}
           <YStack alignItems="center" marginBottom="$8">
             <Image source={require('../../assets/icon.png')} style={styles.logo} />
-            <Text fontSize={24} fontWeight="700" color="#1d1d1f" marginTop="$3">
+            <Text fontSize={24} fontWeight="700" color={colors.text.primary} marginTop="$3">
               Nephele
             </Text>
-            <Text fontSize={13} color="#999999" marginTop="$1">
+            <Text fontSize={13} color={colors.text.tertiary} marginTop="$1">
               次世代画师的次世代工具
             </Text>
           </YStack>
@@ -98,37 +99,37 @@ export default function LoginScreen() {
                 onChangeText={setEmail}
                 keyboardType="email-address"
                 autoCapitalize="none"
-                backgroundColor="#ffffff"
-                borderColor="#e8e8e8"
+                backgroundColor={colors.bg.subtle}
+                borderColor={colors.border.default}
                 borderWidth={1}
                 borderRadius="$3"
                 paddingHorizontal="$3"
-                color="#1d1d1f"
+                color={colors.text.primary}
                 size="$4"
-                focusStyle={{ borderColor: '#b388ff' }}
+                focusStyle={{ borderColor: colors.border.focus }}
                 onSubmitEditing={handleSendCode}
               />
 
               {error !== '' && (
-                <Text color="#FF383C" fontSize={13} textAlign="center">{error}</Text>
+                <Text color={colors.status.error} fontSize={13} textAlign="center">{error}</Text>
               )}
 
               <Button
                 size="$5"
-                backgroundColor="#b388ff"
+                backgroundColor={colors.brand.primary}
                 borderRadius="$3"
                 pressStyle={{ opacity: 0.85 }}
                 onPress={handleSendCode}
                 disabled={loading}
               >
-                <Text color="white" fontWeight="600" fontSize={16}>
+                <Text color={colors.bg.canvas} fontWeight="600" fontSize={16}>
                   {loading ? '发送中...' : '获取验证码'}
                 </Text>
               </Button>
             </YStack>
           ) : (
             <YStack gap="$3">
-              <Text color="#666666" fontSize={14} textAlign="center">
+              <Text color={colors.text.secondary} fontSize={14} textAlign="center">
                 验证码已发送至 {email}
               </Text>
 
@@ -137,32 +138,32 @@ export default function LoginScreen() {
                 value={code}
                 onChangeText={setCode}
                 keyboardType="number-pad"
-                backgroundColor="#ffffff"
-                borderColor="#e8e8e8"
+                backgroundColor={colors.bg.subtle}
+                borderColor={colors.border.default}
                 borderWidth={1}
                 borderRadius="$3"
                 paddingHorizontal="$3"
-                color="#1d1d1f"
+                color={colors.text.primary}
                 size="$4"
-                focusStyle={{ borderColor: '#b388ff' }}
+                focusStyle={{ borderColor: colors.border.focus }}
                 autoFocus
                 maxLength={6}
                 onSubmitEditing={handleVerifyCode}
               />
 
               {error !== '' && (
-                <Text color="#FF383C" fontSize={13} textAlign="center">{error}</Text>
+                <Text color={colors.status.error} fontSize={13} textAlign="center">{error}</Text>
               )}
 
               <Button
                 size="$5"
-                backgroundColor="#b388ff"
+                backgroundColor={colors.brand.primary}
                 borderRadius="$3"
                 pressStyle={{ opacity: 0.85 }}
                 onPress={handleVerifyCode}
                 disabled={loading}
               >
-                <Text color="white" fontWeight="600" fontSize={16}>
+                <Text color={colors.bg.canvas} fontWeight="600" fontSize={16}>
                   {loading ? '验证中...' : '登录'}
                 </Text>
               </Button>
@@ -174,13 +175,13 @@ export default function LoginScreen() {
                 disabled={countdown > 0}
                 onPress={handleSendCode}
               >
-                <Text color={countdown > 0 ? '#bbbbbb' : '#b388ff'} fontSize={14}>
+                <Text color={countdown > 0 ? colors.text.muted : colors.brand.primary} fontSize={14}>
                   {countdown > 0 ? `${countdown}秒后可重新发送` : '重新发送验证码'}
                 </Text>
               </Button>
 
               <Text
-                color="#999999"
+                color={colors.text.tertiary}
                 fontSize={13}
                 textAlign="center"
                 pressStyle={{ opacity: 0.6 }}
@@ -191,11 +192,19 @@ export default function LoginScreen() {
             </YStack>
           )}
 
-          {/* Skip */}
-          <YStack alignItems="center" marginTop="$5">
+          {/* Scan desktop QR */}
+          <YStack alignItems="center" marginTop="$5" gap="$3">
             <Text
-              color="#b388ff"
+              color={colors.brand.primary}
               fontSize={14}
+              pressStyle={{ opacity: 0.6 }}
+              onPress={() => router.push('/auth/scan')}
+            >
+              扫描桌面二维码登录
+            </Text>
+            <Text
+              color={colors.text.tertiary}
+              fontSize={13}
               pressStyle={{ opacity: 0.6 }}
               onPress={() => router.replace('/(tabs)')}
             >
@@ -209,7 +218,7 @@ export default function LoginScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#f5f5f7' },
+  container: { flex: 1, backgroundColor: colors.bg.canvas },
   flex: { flex: 1 },
   logo: { width: 72, height: 72, borderRadius: 16 },
 });

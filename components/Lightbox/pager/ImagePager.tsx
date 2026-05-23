@@ -39,7 +39,7 @@ import Animated, {
   type WithSpringConfig,
 } from 'react-native-reanimated';
 
-import { type Lightbox } from '../state';
+import { type Lightbox, useLightboxControls } from '../state';
 import { type Dimensions, type ImageSource, type LightboxTransforms, type Transform } from '../types';
 // Metro picks ImageItem.android.tsx on Android, ImageItem.ios.tsx on iOS.
 // The iOS file is still a stub returning null (Phase 4) — that's intentional;
@@ -199,6 +199,10 @@ function LightboxView({
   const [imageIndex, setImageIndex] = useState(initialImageIndex);
   const dismissSwipeTranslateY = useSharedValue(0);
   const isFlyingAway = useSharedValue(false);
+  // Push the active page index into the provider so closeLightbox can hand it
+  // back to onClose. Without this the DetailModal stays on the original tap
+  // even after the user swiped to another image.
+  const { setLightboxIndex } = useLightboxControls();
 
   const containerStyle = useAnimatedStyle(() => {
     if (openProgress.get() < 1) {
@@ -272,14 +276,20 @@ function LightboxView({
 
   return (
     <Animated.View style={[styles.container, containerStyle]}>
-      <StatusBar style="light" hidden={isScaled || !showControls} />
+      {/* Always hide the system status bar inside the lightbox — Aura users
+          want the preview to fill the whole screen edge-to-edge, no time/
+          battery/signal chrome competing for attention. Bluesky's original
+          tied hidden to (isScaled || !showControls); we go further. */}
+      <StatusBar style="light" hidden />
       <Animated.View style={[styles.backdrop, backdropStyle]} renderToHardwareTextureAndroid />
       <PagerView
         // Disable horizontal paging while zoomed — inner Pan gesture takes over.
         scrollEnabled={!isScaled}
         initialPage={initialImageIndex}
         onPageSelected={e => {
-          setImageIndex(e.nativeEvent.position);
+          const pos = e.nativeEvent.position;
+          setImageIndex(pos);
+          setLightboxIndex(pos);
           // Reset zoom across page changes so the new page starts at 1:1.
           setIsScaled(false);
         }}
