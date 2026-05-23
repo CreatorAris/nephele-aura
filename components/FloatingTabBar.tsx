@@ -65,7 +65,7 @@ function TabItem({ focused, onPress, icon, label }: {
           numberOfLines={1}
           style={[styles.label, {
             color: focused ? colors.brand.primary : colors.text.secondary,
-            fontWeight: focused ? '600' : '500',
+            fontWeight: focused ? '700' : '500',
           }]}
         >
           {label}

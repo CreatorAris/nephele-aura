@@ -1,17 +1,18 @@
 import {
   Pressable, Dimensions, Modal, ScrollView, FlatList,
-  BackHandler, Platform, StyleSheet, Alert, View,
+  BackHandler, Platform, StyleSheet, Alert, View, Keyboard,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { FlashList } from '@shopify/flash-list';
 import PagerView from 'react-native-pager-view';
+import { LinearGradient as ExpoLinearGradient } from 'expo-linear-gradient';
 import { YStack, XStack, Text, Spinner, Button, Input } from 'tamagui';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   Unplug, Search, CircleX, ImagePlus, X, FolderPlus,
   Images, Check, Folder, SquareCheck, Square,
   Image as ImageIcon, Star, Tag, Trash2, CircleCheck,
-  MoreVertical, SlidersHorizontal, Crosshair, Link2, Plus,
+  SlidersHorizontal, Crosshair, Link2, Plus,
   type LucideIcon,
 } from 'lucide-react-native';
 import React, { useState, useEffect, useCallback, useRef, memo } from 'react';
@@ -20,6 +21,7 @@ import Animated, {
   type AnimatedRef, useAnimatedRef,
   useSharedValue, useAnimatedStyle,
   withRepeat, withSequence, withTiming,
+  FadeIn, FadeOut,
 } from 'react-native-reanimated';
 import { remoteWS, RemoteMessage, RemoteWebSocket } from '../../utils/websocket';
 import { isLoggedIn } from '../../utils/auth';
@@ -60,6 +62,9 @@ const GAP = 6;
 const PAD = 6;
 const COL_W = (SCREEN_W - PAD * 2 - GAP) / 2;
 const PAGE_SIZE = 40;
+// Re-request a visible WAN thumb if it hasn't arrived within this window — a
+// lost response (relay flap / dropped base64) must not blank a cell forever.
+const THUMB_RETRY_MS = 6000;
 const INFO_H = 26;
 
 function fmtSize(b: number) {
@@ -83,7 +88,9 @@ export default function GalleryScreen() {
   const [totalItems, setTotalItems] = useState(0);
   const [error, setError] = useState('');
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
-  const thumbRequested = useRef<Set<string>>(new Set());
+  // id → last-request timestamp (NOT a permanent blacklist — see requestMissingThumbs)
+  const thumbRequested = useRef<Map<string, number>>(new Map());
+  const visibleIds = useRef<Set<string>>(new Set());
   const [detailItem, setDetailItem] = useState<LibraryItem | null>(null);
   const [fileServerUrl, setFileServerUrl] = useState<string | null>(null);
   const { openLightbox: openLightboxControl, closeLightbox: closeLightboxControl } = useLightboxControls();
@@ -111,6 +118,19 @@ export default function GalleryScreen() {
 
   // Search & filter state
   const [searchQuery, setSearchQuery] = useState('');
+  const [searchFocused, setSearchFocused] = useState(false);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const searchInputRef = useRef<any>(null);  // Tamagui Input → TextInput (.blur())
+  // Android: dismissing the keyboard (back / gesture) does NOT blur the
+  // TextInput, so onBlur never fires and the cancel button would linger. Drop
+  // the focused state whenever the keyboard hides, by any means.
+  useEffect(() => {
+    const sub = Keyboard.addListener('keyboardDidHide', () => {
+      setSearchFocused(false);
+      searchInputRef.current?.blur?.();
+    });
+    return () => sub.remove();
+  }, []);
   const [folders, setFolders] = useState<LibraryFolder[]>([]);
   const [allTags, setAllTags] = useState<{ name: string; count: number }[]>([]);
   const [activeFolder, setActiveFolder] = useState<LibraryFolder | null>(null);
@@ -581,19 +601,40 @@ export default function GalleryScreen() {
   // WAN thumbnails: viewport-aware via onViewableItemsChanged (see FlashList below).
   // Only items actually scrolled into view get a thumb request — avoids hammering
   // the desktop with 200 Pillow+base64 jobs when the user only scrolls 20 cells.
+  // Request thumbs for visible items still missing one. thumbRequested holds a
+  // last-request timestamp, not a permanent flag: if a response is lost (relay
+  // flap / dropped base64) the item is retried after THUMB_RETRY_MS instead of
+  // staying blank forever.
+  const requestMissingThumbs = useCallback(() => {
+    if (fileServerUrl) return; // LAN serves thumbs directly by URL, no request needed
+    const now = Date.now();
+    for (const id of visibleIds.current) {
+      if (thumbsRef.current[id]) continue;                        // already have it
+      const last = thumbRequested.current.get(id);
+      if (last != null && now - last < THUMB_RETRY_MS) continue;  // in flight / recently tried
+      thumbRequested.current.set(id, now);
+      remoteWS.requestThumbnail(id);
+    }
+  }, [fileServerUrl]);
+
   const onViewableItemsChanged = useCallback(
     ({ viewableItems }: { viewableItems: { item: LibraryItem }[] }) => {
-      if (fileServerUrl) return; // LAN serves thumbs directly by URL, no request needed
-      for (const v of viewableItems) {
-        const id = v.item?.id;
-        if (!id || thumbRequested.current.has(id)) continue;
-        thumbRequested.current.add(id);
-        remoteWS.requestThumbnail(id);
-      }
+      visibleIds.current = new Set(
+        viewableItems.map(v => v.item?.id).filter((id): id is string => !!id)
+      );
+      requestMissingThumbs();
     },
-    [fileServerUrl]
+    [requestMissingThumbs]
   );
   const viewabilityConfig = useRef({ itemVisiblePercentThreshold: 50 }).current;
+
+  // Self-heal: periodically retry visible thumbs whose response never arrived.
+  // Without it a single dropped reply leaves the cell blank until next search.
+  useEffect(() => {
+    if (fileServerUrl) return;
+    const t = setInterval(requestMissingThumbs, 4000);
+    return () => clearInterval(t);
+  }, [fileServerUrl, requestMissingThumbs]);
 
   // Auto-connect to relay when this tab is focused. Lifted here from the
   // (deleted) workshop tab — without it, remoteWS.connect() is never called
@@ -833,30 +874,36 @@ export default function GalleryScreen() {
         /* Normal header — search bar + import + kebab. Pull-to-refresh
             replaces the old refresh icon button; kebab toggles select mode
             (will expand to a real action sheet once a second entry lands). */
-        <XStack paddingHorizontal={16} paddingTop={10} paddingBottom={8} gap={14} alignItems="center">
-          <XStack flex={1} backgroundColor={colors.bg.surface} borderRadius={12} paddingLeft={12}
-            alignItems="center" borderWidth={1} borderColor={searchQuery ? colors.brand.primary : colors.border.default}
-            height={40}>
-            <Search size={18} color={colors.text.tertiary} />
-            <Input flex={1} placeholder="搜索素材..." value={searchQuery}
+        <XStack paddingHorizontal={16} paddingTop={14} paddingBottom={12} gap={14} alignItems="center">
+          <XStack flex={1} backgroundColor="transparent" borderRadius={8} paddingLeft={12}
+            alignItems="center" borderWidth={1} overflow="hidden"
+            borderColor={(searchFocused || searchQuery) ? colors.brand.primary : colors.border.default}
+            height={44}>
+            {/* Glass depth — subtle lighter-top gradient so the field reads as
+                "raised" on the dark canvas (shadows don't show on dark). */}
+            <ExpoLinearGradient colors={['#332E52', '#27233F']}
+              start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }} style={StyleSheet.absoluteFill} />
+            <Search size={19} color={colors.brand.primary} />
+            <Input ref={searchInputRef} flex={1} placeholder="搜索素材..." value={searchQuery}
               onChangeText={onSearchChange} backgroundColor="transparent" borderWidth={0}
               color={colors.text.primary} fontSize={14} height={38}
-              placeholderTextColor={colors.text.muted} returnKeyType="search" />
+              placeholderTextColor={colors.text.muted} returnKeyType="search"
+              onFocus={() => setSearchFocused(true)} onBlur={() => setSearchFocused(false)} />
             {searchQuery ? (
               <Pressable onPress={() => onSearchChange('')} style={{ paddingRight: 10 }} hitSlop={6}>
                 <CircleX size={16} color={colors.text.faint} />
               </Pressable>
             ) : null}
           </XStack>
-          <Pressable onPress={chooseImportSource} hitSlop={8}
-            disabled={importState.stage === 'uploading' || importState.stage === 'importing'}>
-            <ImagePlus size={22}
-              color={importState.stage === 'uploading' || importState.stage === 'importing'
-                ? colors.text.faint : colors.text.secondary} />
-          </Pressable>
-          <Pressable onPress={() => enterSelectMode()} hitSlop={8}>
-            <MoreVertical size={22} color={colors.text.secondary} />
-          </Pressable>
+          {/* Cancel-on-focus (tmui x-search showCancel): slides in while the
+              search is focused; clears + dismisses the keyboard. */}
+          {searchFocused && (
+            <Animated.View entering={FadeIn.duration(160)} exiting={FadeOut.duration(120)}>
+              <Pressable onPress={() => { onSearchChange(''); Keyboard.dismiss(); }} hitSlop={8}>
+                <Text fontSize={14} color={colors.brand.primary}>取消</Text>
+              </Pressable>
+            </Animated.View>
+          )}
         </XStack>
       )}
 
@@ -864,15 +911,15 @@ export default function GalleryScreen() {
           in TagPickerSheet now); count moved inline to the right edge.
           Hidden in select mode to keep the chrome focused on the batch task. */}
       {!selectMode && (
-      <XStack paddingHorizontal={16} paddingBottom={10} alignItems="center" gap={8}>
+      <XStack paddingHorizontal={16} paddingBottom={14} alignItems="center" gap={10}>
         <ScrollView horizontal showsHorizontalScrollIndicator={false}
           style={{ flexGrow: 1, flexShrink: 1 }}
-          contentContainerStyle={{ gap: 8, alignItems: 'center' }}>
-          <Pressable onPress={() => setFilterOpen(true)}>
+          contentContainerStyle={{ gap: 10, alignItems: 'center' }}>
+          <Pressable onPress={() => setFilterOpen(true)} style={({ pressed }) => ({ opacity: pressed ? 0.6 : 1 })}>
             <FilterChip label={activeFolder ? activeFolder.name : '文件夹'}
               active={!!activeFolder} icon={Folder} />
           </Pressable>
-          <Pressable onPress={() => setTagPickerOpen(true)}>
+          <Pressable onPress={() => setTagPickerOpen(true)} style={({ pressed }) => ({ opacity: pressed ? 0.6 : 1 })}>
             <FilterChip label={filterSummary}
               active={filterSummaryActive} icon={SlidersHorizontal} />
           </Pressable>
@@ -886,7 +933,7 @@ export default function GalleryScreen() {
           )}
         </ScrollView>
         {totalItems > 0 && (
-          <Text fontSize={12} color={colors.text.tertiary}>{totalItems}</Text>
+          <Text fontSize={12} fontWeight="500" color={colors.text.tertiary}>{totalItems.toLocaleString()} 项</Text>
         )}
       </XStack>
       )}
@@ -1187,12 +1234,12 @@ function FolderFilterSheet({ visible, folders, activeId, onSelect, onClose,
 
 function FilterChip({ label, active, icon: Icon }: { label: string; active: boolean; icon: LucideIcon }) {
   return (
-    <XStack backgroundColor={active ? colors.brand.soft : colors.bg.surface}
-      borderRadius={16} paddingHorizontal={10} paddingVertical={5}
-      alignItems="center" gap={4}
-      borderWidth={1} borderColor={active ? colors.brand.primary : colors.border.default}>
-      <Icon size={14} color={active ? colors.brand.primary : colors.text.tertiary} />
-      <Text fontSize={12} color={active ? colors.brand.primary : colors.text.secondary} numberOfLines={1} maxWidth={120}>
+    <XStack backgroundColor={active ? colors.brand.primary : colors.bg.surface}
+      borderRadius={16} paddingHorizontal={13} paddingVertical={7}
+      alignItems="center" gap={5}>
+      <Icon size={15} color={active ? colors.bg.canvas : colors.text.tertiary} />
+      <Text fontSize={13} fontWeight={active ? '600' : '500'}
+        color={active ? colors.bg.canvas : colors.text.secondary} numberOfLines={1} maxWidth={120}>
         {label}
       </Text>
     </XStack>
