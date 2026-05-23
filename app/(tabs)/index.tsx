@@ -26,6 +26,7 @@ import { isLoggedIn } from '../../utils/auth';
 import { useLightbox, useLightboxControls, type ImageSource as LbImageSource } from '../../components/Lightbox';
 import { colors } from '../../theme/colors';
 import { TAB_BAR_CLEARANCE } from '../../components/FloatingTabBar';
+import { uploadBus } from '../../utils/uploadBus';
 import * as ImagePicker from 'expo-image-picker';
 import { useShareIntent } from 'expo-share-intent';
 
@@ -300,6 +301,13 @@ export default function GalleryScreen() {
       { text: '取消', style: 'cancel' },
     ]);
   }, [importState.stage, importFromCamera, importFromGallery]);
+
+  // The global floating tab bar's center "+" button triggers this same picker
+  // (via uploadBus, since the import flow owns WS/file-server state here).
+  useEffect(() => {
+    uploadBus.setHandler(chooseImportSource);
+    return () => uploadBus.setHandler(null);
+  }, [chooseImportSource]);
 
   // Cross-app share: receive images shared from Twitter / X / Pixiv / gallery
   // etc. via Android system share sheet. Same upload+import pipeline as the
@@ -1325,7 +1333,7 @@ function CellInner({ item, thumb, selectMode, selected, onPress, onLongPress }: 
       onLongPress={onLongPress}
       delayLongPress={350}
     >
-      <YStack borderRadius={4} overflow="hidden">
+      <YStack borderRadius={14} overflow="hidden">
         <YStack height={h} backgroundColor={colors.bg.thumb} justifyContent="center" alignItems="center">
           {thumb || item.blurhash
             ? <Image
@@ -1358,7 +1366,7 @@ function CellInner({ item, thumb, selectMode, selected, onPress, onLongPress }: 
       {selected && (
         <YStack pointerEvents="none"
           position="absolute" top={0} left={0} right={0} bottom={0}
-          borderRadius={4} borderWidth={2} borderColor={colors.brand.primary} />
+          borderRadius={14} borderWidth={2} borderColor={colors.brand.primary} />
       )}
     </Pressable>
   );

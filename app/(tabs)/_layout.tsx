@@ -1,5 +1,5 @@
 import { Tabs, useRouter } from 'expo-router';
-import { Images, User } from 'lucide-react-native';
+import { Images, User, Rss, Bot } from 'lucide-react-native';
 import { FloatingTabBar } from '../../components/FloatingTabBar';
 import { useEffect, useRef } from 'react';
 import { BackHandler, ToastAndroid, Platform } from 'react-native';
@@ -64,8 +64,28 @@ export default function TabLayout() {
         name="index"
         options={{
           title: '素材库',
-          tabBarIcon: ({ color, size }) => (
-            <Images color={color} size={size} />
+          // line→fill on active (tmui x-tabbar's selectedIcon behavior; lucide
+          // is monoline so we fill it with the same color instead of swapping).
+          tabBarIcon: ({ color, size, focused }) => (
+            <Images color={color} size={size} fill={focused ? color : 'transparent'} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="feed"
+        options={{
+          title: '订阅流',
+          tabBarIcon: ({ color, size, focused }) => (
+            <Rss color={color} size={size} fill={focused ? color : 'transparent'} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="remote"
+        options={{
+          title: '远控',
+          tabBarIcon: ({ color, size, focused }) => (
+            <Bot color={color} size={size} fill={focused ? color : 'transparent'} />
           ),
         }}
       />
@@ -73,8 +93,8 @@ export default function TabLayout() {
         name="profile"
         options={{
           title: '我的',
-          tabBarIcon: ({ color, size }) => (
-            <User color={color} size={size} />
+          tabBarIcon: ({ color, size, focused }) => (
+            <User color={color} size={size} fill={focused ? color : 'transparent'} />
           ),
         }}
       />
