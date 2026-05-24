@@ -39,6 +39,13 @@ export class RemoteWebSocket {
   private transport: TransportMode = null;
   private transportListeners: Set<TransportListener> = new Set();
   private desktopProbeTimer: ReturnType<typeof setTimeout> | null = null;
+  // App-level heartbeat. RN's WebSocket can't send protocol ping frames, and
+  // neither CF's edge nor mobile NAT will hold an idle socket open — without
+  // this, the connection silently dies (abnormal 1006) every ~30-100s and we
+  // flap reconnect→idle→drop forever. The relay DO auto-responds "pong" to
+  // "ping" (setWebSocketAutoResponse) so this never wakes it or reaches desktop.
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private static readonly PING_INTERVAL_MS = 25000;
 
   /**
    * Connect to CF Durable Object relay
@@ -76,6 +83,7 @@ export class RemoteWebSocket {
         console.log('[WS] Connected to relay');
         this.setState('connected');
         this.reconnectDelay = 3000; // reset backoff
+        this.startPing();
         // We're only connected to the CF relay — desktop may or may not be
         // paired on the other side. Probe by asking for status; if desktop
         // is up its bridge will reply with a status event. Otherwise the
@@ -93,6 +101,8 @@ export class RemoteWebSocket {
       };
 
       this.ws.onmessage = (event) => {
+        // Heartbeat ack from the relay's auto-responder — not JSON, just skip it.
+        if (event.data === 'pong') return;
         try {
           const msg: RemoteMessage = JSON.parse(event.data as string);
           // Relay-level peer notifications (defined in CF Worker RemoteRelay).
@@ -114,6 +124,7 @@ export class RemoteWebSocket {
 
       this.ws.onclose = (event) => {
         console.log('[WS] Disconnected:', event.code, event.reason);
+        this.stopPing();
         this.setState('disconnected');
         this.setDesktopOnline(false);
         if (this.desktopProbeTimer) {
@@ -155,8 +166,29 @@ export class RemoteWebSocket {
    * Stop the reconnect loop and notify subscribers so the app can clear
    * credentials and bounce to the login screen.
    */
+  // Heartbeat: send a lightweight "ping" every PING_INTERVAL_MS while open.
+  // The relay's setWebSocketAutoResponse replies "pong" without waking the DO
+  // or forwarding to desktop. The point is the periodic client→server traffic —
+  // it resets NAT / CF edge idle timers so the socket isn't reaped.
+  private startPing(): void {
+    this.stopPing();
+    this.pingTimer = setInterval(() => {
+      if (this.state === 'connected' && this.ws) {
+        try { this.ws.send('ping'); } catch { /* socket dying; onclose will handle */ }
+      }
+    }, RemoteWebSocket.PING_INTERVAL_MS);
+  }
+
+  private stopPing(): void {
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
+  }
+
   private handleAuthInvalid(): void {
     this.authInvalid = true;
+    this.stopPing();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -454,6 +486,7 @@ export class RemoteWebSocket {
    * Disconnect
    */
   disconnect(): void {
+    this.stopPing();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;

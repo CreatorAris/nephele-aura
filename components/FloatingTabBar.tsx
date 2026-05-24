@@ -51,6 +51,8 @@ function barPath(w: number, h: number, r: number, nr: number): string {
   ].join(' ');
 }
 
+// Active state is a true line→fill icon swap (Remixicon, via TabIcon) + brand
+// color + a gentle scale pop — exactly tmui's x-tabbar selectedIcon behavior.
 function TabItem({ focused, onPress, icon, label }: {
   focused: boolean; onPress: () => void; icon: ReactNode; label: string;
 }) {

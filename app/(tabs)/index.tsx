@@ -1,6 +1,6 @@
 import {
   Pressable, Dimensions, Modal, ScrollView, FlatList,
-  BackHandler, Platform, StyleSheet, Alert, View, Keyboard,
+  BackHandler, Platform, StyleSheet, Alert, View, Keyboard, Linking,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { FlashList, type FlashListProps } from '@shopify/flash-list';
@@ -14,6 +14,7 @@ import {
   Images, Check, Folder, SquareCheck, Square,
   Image as ImageIcon, Star, Tag, Trash2, CircleCheck,
   SlidersHorizontal, Crosshair, Link2, Plus, Camera,
+  CloudOff, RotateCw, Ruler, HardDrive, FileText, ChevronRight,
   type LucideIcon,
 } from 'lucide-react-native';
 import React, { useState, useEffect, useCallback, useRef, memo } from 'react';
@@ -21,10 +22,11 @@ import { useFocusEffect } from 'expo-router';
 import Animated, {
   type AnimatedRef, useAnimatedRef,
   useSharedValue, useAnimatedStyle,
-  withRepeat, withSequence, withTiming,
+  withRepeat, withSequence, withTiming, withSpring, runOnJS,
   FadeIn, FadeOut,
   useAnimatedScrollHandler, interpolate, Extrapolation,
 } from 'react-native-reanimated';
+import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import { remoteWS, RemoteMessage, RemoteWebSocket } from '../../utils/websocket';
 import { isLoggedIn } from '../../utils/auth';
 import { useLightbox, useLightboxControls, type ImageSource as LbImageSource } from '../../components/Lightbox';
@@ -32,6 +34,8 @@ import { colors } from '../../theme/colors';
 import { TAB_BAR_CLEARANCE } from '../../components/FloatingTabBar';
 import { uploadBus } from '../../utils/uploadBus';
 import { AuraActionSheet } from '../../components/AuraActionSheet';
+import { AuraDialog } from '../../components/AuraDialog';
+import { GlassCard } from '../../components/GlassCard';
 import * as ImagePicker from 'expo-image-picker';
 import { useShareIntent } from 'expo-share-intent';
 
@@ -95,6 +99,10 @@ export default function GalleryScreen() {
     remoteWS.getState() === 'connected' && remoteWS.getDesktopOnline()
   );
   const [wsState, setWsState] = useState(() => remoteWS.getState());
+  // Grace window after the relay connects but before the desktop pairing status
+  // lands — keeps the screen on "连接中" instead of flashing the "desktop not
+  // running" CTA for the sub-second before status arrives.
+  const [relaySettling, setRelaySettling] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [items, setItems] = useState<LibraryItem[]>([]);
@@ -105,6 +113,10 @@ export default function GalleryScreen() {
   const thumbRequested = useRef<Map<string, number>>(new Map());
   const visibleIds = useRef<Set<string>>(new Set());
   const [detailItem, setDetailItem] = useState<LibraryItem | null>(null);
+  // Delete confirm is hoisted out of DetailModal: an AuraDialog nested inside
+  // DetailModal's <Modal> is the Android two-modal touch footgun. Held here, it
+  // renders as a sibling Modal at screen level (the working pattern).
+  const [pendingTrashId, setPendingTrashId] = useState<string | null>(null);
   const [fileServerUrl, setFileServerUrl] = useState<string | null>(null);
   const { openLightbox: openLightboxControl, closeLightbox: closeLightboxControl } = useLightboxControls();
   const { activeLightbox } = useLightbox();
@@ -180,10 +192,26 @@ export default function GalleryScreen() {
     return () => { unsubState(); unsubDesktop(); };
   }, []);
 
+  useEffect(() => {
+    if (wsState === 'connected' && !connected) {
+      setRelaySettling(true);
+      const t = setTimeout(() => setRelaySettling(false), 2500);
+      return () => clearTimeout(t);
+    }
+    setRelaySettling(false);
+  }, [wsState, connected]);
+
   // Current search params (for loadMore)
   const searchParamsRef = useRef({
     keyword: '', tags: [] as string[], rating: 0, folderId: '',
   });
+
+  // Loading watchdog — a search reply can be lost (relay flap / dropped base64),
+  // leaving `loading` stuck true so the skeleton never clears. We arm a timer on
+  // every load and clear it when the reply lands; if it fires we retry once,
+  // then surface a tappable error so the screen always recovers.
+  const loadWatchdog = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryLoadRef = useRef<(() => void) | null>(null);
 
   // Android back button
   useFocusEffect(
@@ -580,6 +608,7 @@ export default function GalleryScreen() {
         if (d.tags) setAllTags(d.tags);
       }
       if (msg.action === 'eagle_search' || msg.action === 'eagle_recent' || msg.action === 'eagle_items') {
+        if (loadWatchdog.current) { clearTimeout(loadWatchdog.current); loadWatchdog.current = null; }
         setLoading(false); setLoadingMore(false);
         const d = msg.data as {
           items?: LibraryItem[]; total?: number; offset?: number; error?: string;
@@ -596,6 +625,7 @@ export default function GalleryScreen() {
         });
       }
       if (msg.action === 'eagle_pose_search') {
+        if (loadWatchdog.current) { clearTimeout(loadWatchdog.current); loadWatchdog.current = null; }
         setLoading(false);
         const d = msg.data as { success?: boolean; message?: string; items?: LibraryItem[] };
         if (!d.success) { setError(d.message || 'Pose search failed'); return; }
@@ -691,6 +721,30 @@ export default function GalleryScreen() {
     }
   }, [connected]));
 
+  // Arm the loading watchdog: if no reply clears `loading` in time, retry once
+  // (the desktop's still connected — likely a dropped frame), then give up to a
+  // tappable error. Non-recursive so it has no hook deps to chase.
+  // 14s before the first nudge: a recursive folder search over a big library
+  // is legitimately slow, so don't false-alarm on it. If still nothing and the
+  // socket's up, resend once (covers a dropped frame) and wait another 10s.
+  const armWatchdog = useCallback(() => {
+    if (loadWatchdog.current) clearTimeout(loadWatchdog.current);
+    loadWatchdog.current = setTimeout(() => {
+      if (remoteWS.getState() === 'connected' && retryLoadRef.current) {
+        retryLoadRef.current();
+        loadWatchdog.current = setTimeout(() => {
+          setLoading(false); setLoadingMore(false);
+          setError('加载超时');
+        }, 10000);
+      } else {
+        setLoading(false); setLoadingMore(false);
+        setError('加载超时');
+      }
+    }, 14000);
+  }, []);
+
+  useEffect(() => () => { if (loadWatchdog.current) clearTimeout(loadWatchdog.current); }, []);
+
   // Execute search with given params (replaces fetchImages)
   const doSearch = useCallback((params: {
     keyword?: string; tags?: string[]; rating?: number; folderId?: string;
@@ -705,8 +759,17 @@ export default function GalleryScreen() {
       rating: params.rating || 0,
       folderId: params.folderId || '',
     };
-    remoteWS.requestSearch({ ...params, offset: 0, limit: PAGE_SIZE });
-  }, []);
+    retryLoadRef.current = () =>
+      remoteWS.requestSearch({ ...searchParamsRef.current, offset: 0, limit: PAGE_SIZE });
+    // send() returns false when the socket isn't open — fail fast instead of
+    // showing a skeleton that can never resolve.
+    if (!remoteWS.requestSearch({ ...params, offset: 0, limit: PAGE_SIZE })) {
+      if (loadWatchdog.current) { clearTimeout(loadWatchdog.current); loadWatchdog.current = null; }
+      setLoading(false); setError('桌面端未连接');
+      return;
+    }
+    armWatchdog();
+  }, [armWatchdog]);
 
   // Wire the import-finished refresh now that doSearch exists.
   refreshOnImportRef.current = () => doSearch(searchParamsRef.current);
@@ -800,8 +863,14 @@ export default function GalleryScreen() {
     setThumbs({}); thumbRequested.current.clear();
     lanFallbackRef.current.clear();   // don't carry LAN→relay fallbacks across searches
     searchParamsRef.current = { keyword: '', tags: [], rating: 0, folderId: '' };
-    remoteWS.requestPoseSearch({ refItemId });
-  }, []);
+    retryLoadRef.current = () => remoteWS.requestPoseSearch({ refItemId });
+    if (!remoteWS.requestPoseSearch({ refItemId })) {
+      if (loadWatchdog.current) { clearTimeout(loadWatchdog.current); loadWatchdog.current = null; }
+      setLoading(false); setError('桌面端未连接');
+      return;
+    }
+    armWatchdog();
+  }, [armWatchdog]);
 
   // Refs for loadMore stale closure fix
   const itemsRef = useRef(items);
@@ -887,7 +956,42 @@ export default function GalleryScreen() {
   }, [fileServerUrl, selectMode, selectedIds, toggleSelected, enterSelectMode, thumbsVersion, onThumbError]);
 
   if (!connected) {
-    const isConnecting = wsState === 'connecting';
+    // The ONLY actionable disconnected case: relay is up but the desktop app
+    // isn't running (and the pairing status has had time to land). Cold start,
+    // connecting, and between-reconnect gaps are all transient → show a neutral
+    // loading screen, never the scary "未连接" error.
+    const desktopOffline = wsState === 'connected' && !relaySettling;
+    if (desktopOffline) {
+      return (
+        <SafeAreaView style={{ flex: 1, backgroundColor: colors.bg.canvas }}>
+          <YStack flex={1} justifyContent="center" alignItems="center"
+            paddingHorizontal="$5" gap="$3">
+            <YStack width={80} height={80} borderRadius={40}
+              backgroundColor={colors.bg.thumb}
+              justifyContent="center" alignItems="center">
+              <Unplug size={36} color={colors.text.muted} />
+            </YStack>
+            <YStack alignItems="center" gap={6}>
+              <Text color={colors.text.primary} fontSize={17} fontWeight="600">
+                桌面端未运行
+              </Text>
+              <Text color={colors.text.tertiary} fontSize={13} textAlign="center" lineHeight={20}>
+                请在电脑上打开 Nephele Workshop
+              </Text>
+            </YStack>
+            <Pressable onPress={() => remoteWS.connect()} hitSlop={6}>
+              <XStack marginTop={12} backgroundColor={colors.brand.primary}
+                paddingHorizontal={20} paddingVertical={10} borderRadius={20}
+                alignItems="center" gap={8}>
+                <RotateCw size={16} color={colors.bg.canvas} />
+                <Text fontSize={14} fontWeight="600" color={colors.bg.canvas}>重新连接</Text>
+              </XStack>
+            </Pressable>
+          </YStack>
+        </SafeAreaView>
+      );
+    }
+    // Connecting / cold start / reconnecting — neutral loading.
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.bg.canvas }}>
         <YStack flex={1} justifyContent="center" alignItems="center"
@@ -895,35 +999,9 @@ export default function GalleryScreen() {
           <YStack width={80} height={80} borderRadius={40}
             backgroundColor={colors.bg.thumb}
             justifyContent="center" alignItems="center">
-            <Unplug size={36} color={colors.text.muted} />
+            <Spinner size="large" color={colors.brand.primary} />
           </YStack>
-          <YStack alignItems="center" gap={6}>
-            <Text color={colors.text.primary} fontSize={17} fontWeight="600">
-              桌面端未连接
-            </Text>
-            <Text color={colors.text.tertiary} fontSize={13} textAlign="center" lineHeight={20}>
-              {isConnecting ? '正在连接…' : '请在电脑上打开 Nephele Workshop'}
-            </Text>
-          </YStack>
-          <Pressable
-            onPress={() => { if (!isConnecting) remoteWS.connect(); }}
-            disabled={isConnecting}
-            hitSlop={6}
-          >
-            <XStack
-              marginTop={12}
-              backgroundColor={isConnecting ? colors.bg.subtle : colors.brand.primary}
-              paddingHorizontal={20} paddingVertical={10}
-              borderRadius={20}
-              alignItems="center" gap={8}
-            >
-              {isConnecting && <Spinner size="small" color={colors.text.tertiary} />}
-              <Text fontSize={14} fontWeight="600"
-                color={isConnecting ? colors.text.tertiary : colors.bg.canvas}>
-                {isConnecting ? '连接中' : '重新连接'}
-              </Text>
-            </XStack>
-          </Pressable>
+          <Text color={colors.text.tertiary} fontSize={14}>正在连接桌面端…</Text>
         </YStack>
       </SafeAreaView>
     );
@@ -1043,11 +1121,16 @@ export default function GalleryScreen() {
       </XStack>
       )}
 
-      {error ? (
-        <YStack marginHorizontal="$4" marginBottom="$2" backgroundColor={colors.bg.surface}
-          borderRadius="$3" padding="$2.5">
-          <Text color={colors.status.error} fontSize={13}>{error}</Text>
-        </YStack>
+      {/* Inline banner only while a populated grid is visible (e.g. a loadMore
+          or refresh failed). The empty-grid failure renders as a full
+          ListEmptyComponent state below, so we don't double up. */}
+      {error && items.length > 0 ? (
+        <Pressable onPress={() => doSearch(searchParamsRef.current)}>
+          <YStack marginHorizontal="$4" marginBottom="$2" backgroundColor={colors.bg.surface}
+            borderRadius="$3" padding="$2.5">
+            <Text color={colors.status.error} fontSize={13}>{error} · 点击重试</Text>
+          </YStack>
+        </Pressable>
       ) : null}
         </View>
       </Animated.View>
@@ -1078,6 +1161,30 @@ export default function GalleryScreen() {
           refreshing={loading && items.length > 0}
           onRefresh={() => doSearch(searchParamsRef.current)}
           ListEmptyComponent={
+            error ? (
+              // Failure — NOT an empty library. Distinct icon + retry, never the
+              // "import images" call-to-action (that misreads a fault as empty).
+              <YStack paddingTop={60} alignItems="center" gap={12} paddingHorizontal="$5">
+                <YStack width={72} height={72} borderRadius={36}
+                  backgroundColor={colors.bg.thumb}
+                  justifyContent="center" alignItems="center">
+                  <CloudOff size={32} color={colors.text.muted} />
+                </YStack>
+                <Text color={colors.text.primary} fontSize={16} fontWeight="600">{error}</Text>
+                <Text color={colors.text.tertiary} fontSize={13} textAlign="center">
+                  没能从桌面端取到素材
+                </Text>
+                <Pressable onPress={() => doSearch(searchParamsRef.current)} hitSlop={6} style={{ marginTop: 4 }}>
+                  <XStack alignItems="center" gap={6}
+                    backgroundColor={colors.brand.primary}
+                    paddingHorizontal={16} paddingVertical={8}
+                    borderRadius={20}>
+                    <RotateCw size={16} color={colors.bg.canvas} />
+                    <Text color={colors.bg.canvas} fontSize={14} fontWeight="600">重试</Text>
+                  </XStack>
+                </Pressable>
+              </YStack>
+            ) : (
             <YStack paddingTop={60} alignItems="center" gap={12} paddingHorizontal="$5">
               <YStack width={72} height={72} borderRadius={36}
                 backgroundColor={colors.bg.thumb}
@@ -1127,6 +1234,7 @@ export default function GalleryScreen() {
                 </>
               )}
             </YStack>
+            )
           }
           ListFooterComponent={
             loadingMore ? (
@@ -1177,20 +1285,39 @@ export default function GalleryScreen() {
 
       {/* Detail Modal — items + onIndexChange let the modal page horizontally
           through the gallery in lock-step with the lightbox: swipe in either
-          surface updates detailItem, the other surface follows. */}
-      <DetailModal
-        item={detailItem}
-        items={items}
-        getThumb={(id) => (fileServerUrl ? `${fileServerUrl}/thumb/${id}` : thumbs[id])}
-        onIndexChange={(i) => {
-          const tgt = itemsRef.current[i];
-          if (tgt) setDetailItem(tgt);
-        }}
-        onClose={() => setDetailItem(null)}
-        onOpenLightbox={openLightboxAt}
-        onUpdateItem={updateItemOptimistic}
-        onTrash={trashItemOptimistic}
-        onPoseSearch={doPoseSearch} />
+          surface updates detailItem, the other surface follows.
+          Gated on detailItem so the modal MOUNTS FRESH per open: its pager's
+          initialPage is captured from the tapped item at mount. Rendering it
+          permanently froze that index at 0 (detailItem starts null), so every
+          tap snapped back to the first image. */}
+      {detailItem != null && (
+        <DetailModal
+          item={detailItem}
+          items={items}
+          getThumb={(id) => (fileServerUrl ? `${fileServerUrl}/thumb/${id}` : thumbs[id])}
+          onIndexChange={(i) => {
+            const tgt = itemsRef.current[i];
+            if (tgt) setDetailItem(tgt);
+          }}
+          onClose={() => setDetailItem(null)}
+          onOpenLightbox={openLightboxAt}
+          onUpdateItem={updateItemOptimistic}
+          onTrash={(id) => setPendingTrashId(id)}
+          onPoseSearch={doPoseSearch} />
+      )}
+
+      {/* Delete confirm — sibling Modal at screen level (NOT nested in
+          DetailModal's Modal, which breaks touch on Android). */}
+      <AuraDialog
+        visible={pendingTrashId != null}
+        title="删除该图片"
+        message="将移入回收站"
+        cancelLabel="取消"
+        confirmLabel="删除"
+        danger
+        onClose={() => setPendingTrashId(null)}
+        onConfirm={() => { if (pendingTrashId) trashItemOptimistic(pendingTrashId); }}
+      />
 
       {/* Lightbox mounts globally in app/_layout.tsx (overlay); opened via
           useLightboxControls().openLightbox(...). */}
@@ -1869,6 +1996,43 @@ function DetailModal({ item, items, getThumb, onClose, onOpenLightbox,
     setTagDraft('');
   }, [item?.id, item?.annotation]);
 
+  // Drag-to-dismiss bound to the HANDLE only (not the hero) so it reads as a
+  // physical grabber, not a "swipe-anywhere-to-close" gesture. The sheet tracks
+  // the finger 1:1 downward; upward gets rubber-band resistance. Release past a
+  // distance/velocity threshold slides it off and closes, else it springs back.
+  const dragY = useSharedValue(0);
+  const sheetStyle = useAnimatedStyle(() => ({ transform: [{ translateY: dragY.value }] }));
+  const dismissGesture = Gesture.Pan()
+    .onUpdate(e => {
+      dragY.value = e.translationY > 0 ? e.translationY : e.translationY * 0.18;
+    })
+    .onEnd(e => {
+      if (e.translationY > 100 || e.velocityY > 800) {
+        dragY.value = withTiming(SCREEN_H, { duration: 200 }, (finished) => {
+          if (finished) runOnJS(onClose)();
+        });
+      } else {
+        dragY.value = withSpring(0, { damping: 22, stiffness: 240 });
+      }
+    });
+
+  // Hero height adapts to the current image's aspect (capped) so the sheet is
+  // only as tall as the image needs — a wide/short image yields a short hero.
+  // Animated so swiping between images of different ratios eases the height.
+  const imgW = SCREEN_W - 40;                       // 20px gutter each side
+  const imgHCap = Math.min(SCREEN_H * 0.42, 400);
+  const activeItem = items[currentIndex] ?? item;
+  const activeAr = activeItem?.width && activeItem?.height ? activeItem.width / activeItem.height : 1;
+  const activeHIt = Math.min(imgW / activeAr, imgHCap);
+  const heroH = useSharedValue(activeHIt);
+  useEffect(() => { heroH.value = withTiming(activeHIt, { duration: 220 }); }, [activeHIt, heroH]);
+  // Hero is a normal scroll child (see render): reading the details just scrolls
+  // it up and out of the way, content rising to fill the screen. Pure native
+  // scroll — the stable analogue of tmui's position-based sticky, NOT a
+  // scroll-linked height collapse (that janked). Height still animates between
+  // images of different aspect ratios.
+  const heroSizeStyle = useAnimatedStyle(() => ({ height: heroH.value }));
+
   const openLightbox = () => {
     if (!item) return;
     onOpenLightbox(item, thumbRef);
@@ -1904,25 +2068,21 @@ function DetailModal({ item, items, getThumb, onClose, onOpenLightbox,
   // Filename for display drops the extension — the ext appears separately in
   // the metadata caption below, so the title reads cleaner as a "work title".
   const displayName = item.name.replace(/\.[^.]+$/, '');
-  const imgW = SCREEN_W - 40;            // 20px gutter each side
-  // Image cap so meta + actions are visible without scroll on first open.
-  // Pager has fixed height = cap; each page's image fits within via its
-  // own aspect-correct box centered vertically inside the page.
-  const imgHCap = Math.min(SCREEN_H * 0.42, 400);
   const star = item.star || 0;
 
   return (
     <Modal visible animationType="slide" transparent onRequestClose={onClose}>
-      {/* RN touch-responder fix: outer is a plain View (not a Pressable) so
-          gesture events inside the sheet propagate to the ScrollView. The
-          backdrop is a sibling Pressable; sheet sits on top via render order. */}
-      <View style={{ flex: 1 }}>
+      {/* GestureHandlerRootView is REQUIRED here: RN <Modal> renders in its own
+          native window outside the app's root GestureHandlerRootView, so without
+          re-rooting it the handle's GestureDetector gets no touch events at all.
+          The backdrop is a sibling Pressable; the sheet sits on top by order. */}
+      <GestureHandlerRootView style={{ flex: 1 }}>
         <Pressable
           style={{ ...StyleSheet.absoluteFillObject, backgroundColor: colors.overlay.scrim }}
           onPress={onClose}
         />
-        <View
-          style={{
+        <Animated.View
+          style={[{
             position: 'absolute',
             bottom: 0, left: 0, right: 0,
             backgroundColor: colors.bg.canvas,
@@ -1930,234 +2090,265 @@ function DetailModal({ item, items, getThumb, onClose, onOpenLightbox,
             borderTopRightRadius: 20,
             maxHeight: '92%',
             overflow: 'hidden',
-          }}
+          }, sheetStyle]}
         >
-          {/* Drag handle */}
-          <YStack alignItems="center" paddingTop={10} paddingBottom={6}>
-            <YStack width={36} height={4} borderRadius={2}
-              backgroundColor={colors.border.default} />
-          </YStack>
+          {/* Drag handle — the grab affordance. ONLY this zone drives the
+              follow-the-finger drag-to-dismiss; the hero below stays a normal
+              image (tap = lightbox, horizontal swipe = pager). */}
+          <GestureDetector gesture={dismissGesture}>
+            <YStack alignItems="center" paddingTop={12} paddingBottom={10}>
+              <YStack width={44} height={5} borderRadius={3}
+                backgroundColor={colors.border.default} />
+            </YStack>
+          </GestureDetector>
 
-          {/* Hero pager — sits outside the ScrollView so it stays anchored
-              at the top while metadata scrolls underneath. Each page renders
-              one item's image; only the active page (and its ±1 neighbors)
-              actually mount the Image to keep large libraries cheap. The
-              active page wears thumbRef so the lightbox hero animation can
-              still measure from the right view after a swipe. */}
-          <PagerView
-            ref={pagerRef}
-            style={{ width: SCREEN_W, height: imgHCap, marginTop: 4 }}
-            initialPage={initialIndexRef.current}
-            onPageSelected={e => {
-              const pos = e.nativeEvent.position;
-              pagerPageRef.current = pos;
-              onIndexChange(pos);
-            }}
-          >
-            {items.map((it, i) => {
-              const isActive = i === currentIndex;
-              const inWindow = Math.abs(i - currentIndex) <= 1;
-              const arIt = it.width && it.height ? it.width / it.height : 1;
-              const hIt = Math.min(imgW / arIt, imgHCap);
-              const thumbIt = getThumb(it.id);
-              return (
-                <View key={it.id} style={{ justifyContent: 'center', alignItems: 'center' }}>
-                  {inWindow && (
-                    <Pressable onPress={isActive ? openLightbox : undefined}>
-                      <Animated.View
-                        ref={isActive ? thumbRef : undefined}
-                        collapsable={false}
-                        style={{
-                          width: imgW - 8, height: hIt,
-                          backgroundColor: colors.bg.thumb,
-                          borderRadius: 12,
-                          overflow: 'hidden',
-                        }}
-                      >
-                        {thumbIt ? (
-                          <Image source={thumbIt}
-                            style={{ width: imgW - 8, height: hIt }}
-                            contentFit="contain"
-                            cachePolicy="memory-disk"
-                            placeholder={it.blurhash ? { blurhash: it.blurhash } : undefined}
-                            placeholderContentFit="contain"
-                            transition={150} />
-                        ) : (
-                          <YStack flex={1} justifyContent="center" alignItems="center">
-                            <Spinner size="small" color={colors.brand.primary} />
-                          </YStack>
-                        )}
-                      </Animated.View>
-                    </Pressable>
-                  )}
-                </View>
-              );
-            })}
-          </PagerView>
-
-          {/* Metadata — scrolls vertically below the hero pager. Each block
-              has its own visual idiom matched to the data type (hero
-              typography / inline meta strip / chip group / annotation accent
-              / icon-led link). Different idioms create hierarchy that 4
-              same-shaped Field rows can't. */}
+          {/* Single ScrollView owns BOTH the hero and the metadata, so the hero
+              scrolls away naturally (no scroll-linked layout). */}
           <ScrollView
             style={{ flexShrink: 1 }}
-            contentContainerStyle={{ paddingHorizontal: 24, paddingTop: 16, paddingBottom: 24 }}
+            contentContainerStyle={{ paddingTop: 4, paddingBottom: 24 }}
             keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
           >
-            {/* Hero typography — filename dominates, meta + rating ride
-                along on a single small caption row to free vertical space. */}
-            <YStack gap={8}>
-              <Text
-                color={colors.text.primary}
-                fontSize={24}
-                fontWeight="600"
-                lineHeight={30}
-                numberOfLines={3}
-              >
-                {displayName}
-              </Text>
-              <XStack alignItems="center" gap={10} flexWrap="wrap">
-                <Text color={colors.text.tertiary} fontSize={12}>
-                  {(item.ext || '').toUpperCase()} · {item.width} × {item.height} · {fmtSize(item.size)}
-                </Text>
-                {star > 0 && (
-                  <XStack alignItems="center" gap={3}>
-                    <Star size={12} color={colors.brand.primary} fill={colors.brand.primary} />
-                    <Text color={colors.brand.primary} fontSize={12} fontWeight="600">{star}</Text>
+          {/* Hero pager — a scroll child; height animates to the current image's
+              aspect so the sheet is only as tall as needed. Each page's image
+              fills the container and contains within it; only the active page
+              (±1) mounts an Image. The active page wears thumbRef for the
+              lightbox hero measurement. */}
+          <Animated.View style={[{ width: SCREEN_W }, heroSizeStyle]}>
+            <PagerView
+              ref={pagerRef}
+              style={{ flex: 1, width: SCREEN_W }}
+              initialPage={initialIndexRef.current}
+              onPageSelected={e => {
+                const pos = e.nativeEvent.position;
+                pagerPageRef.current = pos;
+                onIndexChange(pos);
+              }}
+            >
+              {items.map((it, i) => {
+                const isActive = i === currentIndex;
+                const inWindow = Math.abs(i - currentIndex) <= 1;
+                const thumbIt = getThumb(it.id);
+                return (
+                  <View key={it.id} style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+                    {inWindow && (
+                      <Pressable onPress={isActive ? openLightbox : undefined}
+                        style={{ flex: 1, width: '100%', justifyContent: 'center', alignItems: 'center' }}>
+                        <Animated.View
+                          ref={isActive ? thumbRef : undefined}
+                          collapsable={false}
+                          style={{
+                            width: imgW - 8, height: '100%',
+                            backgroundColor: thumbIt ? 'transparent' : colors.bg.thumb,
+                            borderRadius: 12, overflow: 'hidden',
+                          }}
+                        >
+                          {thumbIt ? (
+                            <Image source={thumbIt}
+                              style={{ width: '100%', height: '100%' }}
+                              contentFit="contain"
+                              cachePolicy="memory-disk"
+                              placeholder={it.blurhash ? { blurhash: it.blurhash } : undefined}
+                              placeholderContentFit="contain"
+                              transition={150} />
+                          ) : (
+                            <YStack flex={1} justifyContent="center" alignItems="center">
+                              <Spinner size="small" color={colors.brand.primary} />
+                            </YStack>
+                          )}
+                        </Animated.View>
+                      </Pressable>
+                    )}
+                  </View>
+                );
+              })}
+            </PagerView>
+            {/* Soft edge — image melts into the content background instead of a
+                hard rectangular cut. */}
+            <ExpoLinearGradient pointerEvents="none"
+              colors={['transparent', colors.bg.canvas]}
+              style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 44 }} />
+          </Animated.View>
+
+          {/* Metadata — rises to fill the screen as the hero scrolls away. */}
+          <YStack paddingHorizontal={24} paddingTop={16}>
+            {/* Hero title — the work identity. Facts move into the cell group
+                below, so the title stands alone. */}
+            <Text
+              color={colors.text.primary}
+              fontSize={24}
+              fontWeight="600"
+              lineHeight={30}
+              numberOfLines={3}
+            >
+              {displayName}
+            </Text>
+
+            {/* tmui x-cell group — every field is a row: leading brand icon +
+                label, value/control on the right; multi-value fields (标签/备注)
+                expand vertically under their label. Hairlines align under the
+                label (indent = padH 16 + icon 18 + gap 12). */}
+            <GlassCard style={{ padding: 0, gap: 0, marginTop: 16 }}>
+              {/* 评分 */}
+              <XStack alignItems="center" paddingVertical={12} paddingHorizontal={16} gap={12}>
+                <Star size={18} color={colors.brand.primary} />
+                <Text color={colors.text.secondary} fontSize={14}>评分</Text>
+                <YStack flex={1} />
+                {onUpdateItem ? (
+                  <XStack gap={6}>
+                    {[1, 2, 3, 4, 5].map(i => {
+                      const filled = i <= star;
+                      return (
+                        <Pressable key={i} hitSlop={4} onPress={() => setStar(i)}>
+                          <Star size={20}
+                            color={filled ? colors.brand.primary : colors.text.faint}
+                            fill={filled ? colors.brand.primary : 'none'} />
+                        </Pressable>
+                      );
+                    })}
                   </XStack>
+                ) : star > 0 ? (
+                  <XStack alignItems="center" gap={3}>
+                    <Star size={14} color={colors.brand.primary} fill={colors.brand.primary} />
+                    <Text color={colors.text.primary} fontSize={14}>{star}</Text>
+                  </XStack>
+                ) : (
+                  <Text color={colors.text.muted} fontSize={14}>未评分</Text>
                 )}
               </XStack>
-            </YStack>
+              <YStack height={1} backgroundColor="rgba(206,172,224,0.10)" marginLeft={46} />
 
-            {/* Rating row — interactive stars without a label. The stars
-                themselves communicate "rating", and putting them right after
-                the meta caption ties them to the file identity. */}
-            {onUpdateItem && (
-              <XStack alignItems="center" gap={8} marginTop={22}>
-                {[1, 2, 3, 4, 5].map(i => {
-                  const filled = i <= star;
-                  return (
-                    <Pressable key={i} hitSlop={6} onPress={() => setStar(i)}>
-                      <Star size={24}
-                        color={filled ? colors.brand.primary : colors.text.faint}
-                        fill={filled ? colors.brand.primary : 'none'} />
-                    </Pressable>
-                  );
-                })}
-              </XStack>
-            )}
-
-            {/* Tags — chips row, add input on its own row so the input has
-                room to breathe (cramming a tiny input at the end of a wrap
-                row read as "shrunk and afterthought"). */}
-            <YStack marginTop={onUpdateItem ? 20 : 24} gap={10}>
-              {item.tags.length > 0 ? (
-                <XStack flexWrap="wrap" gap={6} rowGap={8} alignItems="center">
-                  {item.tags.map(t => (
-                    <Pressable key={t}
-                      onPress={onUpdateItem ? () => removeTag(t) : undefined}
-                      hitSlop={4}
-                    >
-                      <XStack backgroundColor={colors.brand.soft}
-                        borderRadius={12} paddingHorizontal={10} paddingVertical={4}
-                        alignItems="center" gap={5}>
+              {/* 标签 — vertical cell (chips + add input under the label) */}
+              <YStack paddingVertical={12} paddingHorizontal={16} gap={10}>
+                <XStack alignItems="center" gap={12}>
+                  <Tag size={18} color={colors.brand.primary} />
+                  <Text color={colors.text.secondary} fontSize={14}>标签</Text>
+                  {!onUpdateItem && item.tags.length === 0 && (
+                    <><YStack flex={1} /><Text color={colors.text.muted} fontSize={14}>无</Text></>
+                  )}
+                </XStack>
+                {(item.tags.length > 0 || onUpdateItem) && (
+                  // tmui x-input-tag "in" mode: chips + the add-input share ONE
+                  // rounded field; tags wrap, input flows in at the end. Delete is
+                  // a soft filled circle-x (tmui close-circle-fill), muted gray.
+                  <XStack marginLeft={30} flexWrap="wrap" gap={8} alignItems="center"
+                    backgroundColor={onUpdateItem ? colors.bg.subtle : 'transparent'}
+                    borderRadius={12}
+                    paddingVertical={onUpdateItem ? 8 : 0}
+                    paddingHorizontal={onUpdateItem ? 10 : 0}
+                    minHeight={onUpdateItem ? 42 : undefined}>
+                    {item.tags.map(t => (
+                      <XStack key={t} backgroundColor={colors.brand.soft}
+                        borderRadius={8} paddingLeft={10} paddingRight={onUpdateItem ? 5 : 10}
+                        paddingVertical={4} alignItems="center" gap={4}>
                         <Text fontSize={13} color={colors.brand.primary}>{t}</Text>
-                        {onUpdateItem && <X size={12} color={colors.brand.primary} />}
+                        {onUpdateItem && (
+                          <Pressable onPress={() => removeTag(t)} hitSlop={6}>
+                            <CircleX size={15} color={colors.text.faint} />
+                          </Pressable>
+                        )}
                       </XStack>
-                    </Pressable>
-                  ))}
-                </XStack>
-              ) : !onUpdateItem ? (
-                <Text color={colors.text.muted} fontSize={13}>暂无标签</Text>
-              ) : null}
-              {onUpdateItem && (
-                <XStack
-                  backgroundColor={colors.bg.subtle}
-                  borderRadius={12}
-                  paddingHorizontal={12}
-                  alignItems="center"
-                  gap={8}
-                  height={36}
-                >
-                  <Plus size={14} color={colors.text.tertiary} />
-                  <Input
-                    flex={1}
-                    value={tagDraft}
-                    onChangeText={setTagDraft}
-                    onSubmitEditing={addTag}
-                    placeholder="添加标签后回车"
-                    placeholderTextColor={colors.text.muted as any}
-                    backgroundColor="transparent" borderWidth={0}
-                    color={colors.text.primary} fontSize={13}
-                    height={36}
-                    paddingHorizontal={0}
-                    returnKeyType="done"
-                  />
-                </XStack>
-              )}
-            </YStack>
+                    ))}
+                    {onUpdateItem && (
+                      <Input
+                        flex={1} minWidth={70}
+                        value={tagDraft}
+                        onChangeText={setTagDraft}
+                        onSubmitEditing={addTag}
+                        blurOnSubmit={false}
+                        placeholder={item.tags.length ? '添加' : '添加标签后回车'}
+                        placeholderTextColor={colors.text.muted as any}
+                        backgroundColor="transparent" borderWidth={0}
+                        color={colors.text.primary} fontSize={13}
+                        height={30} paddingHorizontal={0} paddingVertical={0}
+                        returnKeyType="done"
+                      />
+                    )}
+                  </XStack>
+                )}
+              </YStack>
+              <YStack height={1} backgroundColor="rgba(206,172,224,0.10)" marginLeft={46} />
 
-            {/* Notes — annotation accent (margin-note idiom). */}
-            <XStack alignItems="stretch" minHeight={48} marginTop={24}>
-              <YStack
-                width={2}
-                backgroundColor={colors.brand.primary}
-                opacity={0.35}
-                borderRadius={1}
-                marginRight={14}
-              />
-              {onUpdateItem ? (
-                <Input
-                  flex={1}
-                  value={annotationDraft}
-                  onChangeText={setAnnotationDraft}
-                  onBlur={commitAnnotation}
-                  placeholder="写点什么…"
-                  placeholderTextColor={colors.text.muted as any}
-                  multiline
-                  backgroundColor="transparent"
-                  borderWidth={0}
-                  color={colors.text.primary}
-                  fontSize={14}
-                  lineHeight={22}
-                  paddingHorizontal={0}
-                  paddingVertical={2}
-                  textAlignVertical="top"
-                />
-              ) : item.annotation ? (
-                <Text flex={1} color={colors.text.primary} fontSize={14} lineHeight={22}>
-                  {item.annotation}
-                </Text>
-              ) : (
-                <Text flex={1} color={colors.text.muted} fontSize={14} lineHeight={22}>
-                  尚未添加备注
-                </Text>
-              )}
-            </XStack>
+              {/* 尺寸 */}
+              <XStack alignItems="center" paddingVertical={12} paddingHorizontal={16} gap={12}>
+                <Ruler size={18} color={colors.brand.primary} />
+                <Text color={colors.text.secondary} fontSize={14}>尺寸</Text>
+                <YStack flex={1} />
+                <Text color={colors.text.primary} fontSize={14}>{item.width} × {item.height}</Text>
+              </XStack>
+              <YStack height={1} backgroundColor="rgba(206,172,224,0.10)" marginLeft={46} />
 
-            {/* Source URL — icon-led inline, no label. The link icon both
-                identifies the row's purpose and gives the URL a left anchor
-                so long strings wrap cleanly. */}
-            {item.url ? (
-              <XStack alignItems="flex-start" gap={10} marginTop={22}>
-                <Link2 size={14} color={colors.text.tertiary} style={{ marginTop: 4 }} />
-                <Text
-                  flex={1}
-                  color={colors.brand.primary}
-                  fontSize={13}
-                  lineHeight={20}
-                  numberOfLines={2}
-                >
-                  {item.url}
+              {/* 大小 (format folded in) */}
+              <XStack alignItems="center" paddingVertical={12} paddingHorizontal={16} gap={12}>
+                <HardDrive size={18} color={colors.brand.primary} />
+                <Text color={colors.text.secondary} fontSize={14}>大小</Text>
+                <YStack flex={1} />
+                <Text color={colors.text.primary} fontSize={14}>
+                  {(item.ext || '').toUpperCase()} · {fmtSize(item.size)}
                 </Text>
               </XStack>
-            ) : null}
+
+              {/* 来源 — tappable, opens externally */}
+              {item.url ? (
+                <>
+                  <YStack height={1} backgroundColor="rgba(206,172,224,0.10)" marginLeft={46} />
+                  <Pressable onPress={() => Linking.openURL(item.url!).catch(() => {})}>
+                    <XStack alignItems="center" paddingVertical={12} paddingHorizontal={16} gap={12}>
+                      <Link2 size={18} color={colors.brand.primary} />
+                      <Text color={colors.text.secondary} fontSize={14}>来源</Text>
+                      <YStack flex={1} />
+                      <Text color={colors.brand.primary} fontSize={14} numberOfLines={1}
+                        style={{ maxWidth: 150 }}>{item.url}</Text>
+                      <ChevronRight size={16} color={colors.text.faint} />
+                    </XStack>
+                  </Pressable>
+                </>
+              ) : null}
+              <YStack height={1} backgroundColor="rgba(206,172,224,0.10)" marginLeft={46} />
+
+              {/* 备注 — vertical cell */}
+              <YStack paddingVertical={12} paddingHorizontal={16} gap={8}>
+                <XStack alignItems="center" gap={12}>
+                  <FileText size={18} color={colors.brand.primary} />
+                  <Text color={colors.text.secondary} fontSize={14}>备注</Text>
+                </XStack>
+                <YStack marginLeft={30}>
+                  {onUpdateItem ? (
+                    // Matching tmui textarea field — same rounded fill as the
+                    // tag input so the two editable rows read as a set.
+                    <YStack backgroundColor={colors.bg.subtle} borderRadius={12}
+                      paddingHorizontal={12} paddingVertical={10} minHeight={64}>
+                      <Input
+                        value={annotationDraft}
+                        onChangeText={setAnnotationDraft}
+                        onBlur={commitAnnotation}
+                        placeholder="写点什么…"
+                        placeholderTextColor={colors.text.muted as any}
+                        multiline
+                        backgroundColor="transparent" borderWidth={0}
+                        color={colors.text.primary} fontSize={14} lineHeight={22}
+                        paddingHorizontal={0} paddingVertical={0}
+                        textAlignVertical="top"
+                      />
+                    </YStack>
+                  ) : item.annotation ? (
+                    <Text color={colors.text.primary} fontSize={14} lineHeight={22}>{item.annotation}</Text>
+                  ) : (
+                    <Text color={colors.text.muted} fontSize={14}>尚未添加备注</Text>
+                  )}
+                </YStack>
+              </YStack>
+            </GlassCard>
+          </YStack>
           </ScrollView>
 
           {/* Fixed footer — always reachable regardless of scroll position.
               Sits on top of the safe-area bottom so destructive actions
               don't disappear behind gesture bars. */}
+          {/* Footer — balanced filled "thin" buttons (tmui x-button soft-fill
+              idiom) instead of flat text actions. Drag handle + backdrop tap
+              already dismiss, so no redundant 关闭. */}
           <XStack
             paddingHorizontal={20}
             paddingTop={12}
@@ -2165,38 +2356,31 @@ function DetailModal({ item, items, getThumb, onClose, onOpenLightbox,
             backgroundColor={colors.bg.canvas}
             borderTopWidth={1}
             borderTopColor={colors.border.hairline}
-            justifyContent="space-between"
-            alignItems="center"
+            gap={12}
           >
-            <XStack gap={20} alignItems="center">
-              {onPoseSearch && (
-                <Pressable onPress={() => onPoseSearch(item.id)} hitSlop={8}>
-                  <XStack alignItems="center" gap={6}>
-                    <Crosshair size={18} color={colors.text.secondary} />
-                    <Text fontSize={14} color={colors.text.secondary}>姿势搜索</Text>
-                  </XStack>
-                </Pressable>
-              )}
-              {onTrash && (
-                <Pressable hitSlop={8}
-                  onPress={() => Alert.alert('删除该图片', '将移入回收站', [
-                    { text: '取消', style: 'cancel' },
-                    { text: '删除', style: 'destructive', onPress: () => onTrash(item.id) },
-                  ])}
-                >
-                  <XStack alignItems="center" gap={6}>
-                    <Trash2 size={18} color={colors.status.danger} />
-                    <Text fontSize={14} color={colors.status.danger}>删除</Text>
-                  </XStack>
-                </Pressable>
-              )}
-            </XStack>
-            <Pressable onPress={onClose} hitSlop={8}>
-              <Text fontSize={14} color={colors.text.secondary}>关闭</Text>
-            </Pressable>
+            {onPoseSearch && (
+              <Pressable style={({ pressed }) => ({ flex: 1, opacity: pressed ? 0.7 : 1 })}
+                onPress={() => onPoseSearch(item.id)}>
+                <XStack height={46} borderRadius={12} backgroundColor={colors.brand.soft}
+                  alignItems="center" justifyContent="center" gap={7}>
+                  <Crosshair size={17} color={colors.brand.primary} />
+                  <Text fontSize={14} fontWeight="600" color={colors.brand.primary}>姿势搜索</Text>
+                </XStack>
+              </Pressable>
+            )}
+            {onTrash && (
+              <Pressable style={({ pressed }) => ({ flex: 1, opacity: pressed ? 0.7 : 1 })}
+                onPress={() => onTrash(item.id)}>
+                <XStack height={46} borderRadius={12} backgroundColor={colors.status.dangerSoft}
+                  alignItems="center" justifyContent="center" gap={7}>
+                  <Trash2 size={17} color={colors.status.danger} />
+                  <Text fontSize={14} fontWeight="600" color={colors.status.danger}>删除</Text>
+                </XStack>
+              </Pressable>
+            )}
           </XStack>
-        </View>
-      </View>
+        </Animated.View>
+      </GestureHandlerRootView>
     </Modal>
   );
 }

@@ -40,6 +40,7 @@ export const colors = {
 
   status: {
     danger: '#EC8E94',     // logout / destructive
+    dangerSoft: '#4A2E3A', // destructive button fill — danger tinted toward canvas (parallels brand.soft)
     error: '#E8959A',      // inline error text
     warning: '#F5C878',    // star rating fill, partial success
     success: '#7EC8D9',    // fully successful state (teal)

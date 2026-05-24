@@ -1,6 +1,6 @@
 import { Tabs, useRouter } from 'expo-router';
-import { Images, User, Rss, Bot } from 'lucide-react-native';
 import { FloatingTabBar } from '../../components/FloatingTabBar';
+import { TabIcon } from '../../components/TabIcon';
 import { useEffect, useRef } from 'react';
 import { BackHandler, ToastAndroid, Platform } from 'react-native';
 import { useNavigation } from 'expo-router';
@@ -70,10 +70,9 @@ export default function TabLayout() {
         name="index"
         options={{
           title: '素材库',
-          // line→fill on active (tmui x-tabbar's selectedIcon behavior; lucide
-          // is monoline so we fill it with the same color instead of swapping).
+          // True line→fill swap on active (Remixicon, like tmui's selectedIcon).
           tabBarIcon: ({ color, size, focused }) => (
-            <Images color={color} size={size} fill={focused ? color : 'transparent'} />
+            <TabIcon name="gallery" color={color} size={size} filled={focused} />
           ),
         }}
       />
@@ -82,7 +81,7 @@ export default function TabLayout() {
         options={{
           title: '订阅流',
           tabBarIcon: ({ color, size, focused }) => (
-            <Rss color={color} size={size} fill={focused ? color : 'transparent'} />
+            <TabIcon name="rss" color={color} size={size} filled={focused} />
           ),
         }}
       />
@@ -91,7 +90,7 @@ export default function TabLayout() {
         options={{
           title: '远控',
           tabBarIcon: ({ color, size, focused }) => (
-            <Bot color={color} size={size} fill={focused ? color : 'transparent'} />
+            <TabIcon name="remote" color={color} size={size} filled={focused} />
           ),
         }}
       />
@@ -100,7 +99,7 @@ export default function TabLayout() {
         options={{
           title: '我的',
           tabBarIcon: ({ color, size, focused }) => (
-            <User color={color} size={size} fill={focused ? color : 'transparent'} />
+            <TabIcon name="user" color={color} size={size} filled={focused} />
           ),
         }}
       />
