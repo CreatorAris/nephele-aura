@@ -13,7 +13,7 @@ import {
   Unplug, Search, CircleX, ImagePlus, X, FolderPlus,
   Images, Check, Folder, SquareCheck, Square,
   Image as ImageIcon, Star, Tag, Trash2, CircleCheck,
-  SlidersHorizontal, Crosshair, Link2, Plus,
+  SlidersHorizontal, Crosshair, Link2, Plus, Camera,
   type LucideIcon,
 } from 'lucide-react-native';
 import React, { useState, useEffect, useCallback, useRef, memo } from 'react';
@@ -31,6 +31,7 @@ import { useLightbox, useLightboxControls, type ImageSource as LbImageSource } f
 import { colors } from '../../theme/colors';
 import { TAB_BAR_CLEARANCE } from '../../components/FloatingTabBar';
 import { uploadBus } from '../../utils/uploadBus';
+import { AuraActionSheet } from '../../components/AuraActionSheet';
 import * as ImagePicker from 'expo-image-picker';
 import { useShareIntent } from 'expo-share-intent';
 
@@ -127,6 +128,7 @@ export default function GalleryScreen() {
     | { stage: 'importing'; uploaded: number; total: number; progress: number; failed: number }
     | { stage: 'done'; processed: number; failed: number; total: number };
   const [importState, setImportState] = useState<ImportState>({ stage: 'idle' });
+  const [importSheetVisible, setImportSheetVisible] = useState(false);
 
   // Search & filter state
   const [searchQuery, setSearchQuery] = useState('');
@@ -341,12 +343,8 @@ export default function GalleryScreen() {
 
   const chooseImportSource = useCallback(() => {
     if (importState.stage !== 'idle' && importState.stage !== 'done') return;
-    Alert.alert('添加素材', undefined, [
-      { text: '拍照', onPress: importFromCamera },
-      { text: '从相册选', onPress: importFromGallery },
-      { text: '取消', style: 'cancel' },
-    ]);
-  }, [importState.stage, importFromCamera, importFromGallery]);
+    setImportSheetVisible(true);
+  }, [importState.stage]);
 
   // The global floating tab bar's center "+" button triggers this same picker
   // (via uploadBus, since the import flow owns WS/file-server state here).
@@ -550,8 +548,10 @@ export default function GalleryScreen() {
         })
       );
       setFileServerUrl(winner);
+      remoteWS.setTransport('lan');
     } catch {
       // all probes failed — leave fileServerUrl null so WS path kicks in
+      remoteWS.setTransport('relay');
     }
   }, []);
 
@@ -562,6 +562,7 @@ export default function GalleryScreen() {
       if (msg.type === 'status') {
         const d = msg.data as { fileServerUrls?: string[] };
         if (d.fileServerUrls?.length) probeFileServers(d.fileServerUrls);
+        else remoteWS.setTransport('relay');   // no LAN candidates → relay
         return;
       }
       if (msg.type !== 'event') return;
@@ -671,13 +672,23 @@ export default function GalleryScreen() {
     })();
   }, []));
 
-  // Initial load
+  // Load once, then cache. Tab screens stay mounted (expo-router keeps them
+  // alive across tab switches), so we only fetch on the FIRST focus — returning
+  // to the tab keeps the cached items + scroll position. A ref guard avoids the
+  // stale-closure trap where `items.length` read the value captured when
+  // `connected` flipped (always 0 → it reloaded on every focus). Freshness is
+  // handled by pull-to-refresh, the import-finished refresh, and the reconnect
+  // effect below.
+  const hasLoadedRef = useRef(false);
   useFocusEffect(useCallback(() => {
     if (!connected) return;
     if (!fileServerUrl) remoteWS.requestStatus();
-    if (items.length === 0 && !loading) doSearch({});
-    if (folders.length === 0) remoteWS.requestFolders();
-    if (allTags.length === 0) remoteWS.requestTags();
+    if (!hasLoadedRef.current) {
+      hasLoadedRef.current = true;
+      doSearch({});
+      remoteWS.requestFolders();
+      remoteWS.requestTags();
+    }
   }, [connected]));
 
   // Execute search with given params (replaces fetchImages)
@@ -687,6 +698,7 @@ export default function GalleryScreen() {
     setLoading(true); setError('');
     setItems([]); setTotalItems(0);
     setThumbs({}); thumbRequested.current.clear();
+    lanFallbackRef.current.clear();   // don't carry LAN→relay fallbacks across searches
     searchParamsRef.current = {
       keyword: params.keyword || '',
       tags: params.tags || [],
@@ -698,6 +710,18 @@ export default function GalleryScreen() {
 
   // Wire the import-finished refresh now that doSearch exists.
   refreshOnImportRef.current = () => doSearch(searchParamsRef.current);
+
+  // Reconnect refresh — if the relay dropped and recovered AFTER we'd already
+  // loaded once, resync the current search to catch desktop-side changes missed
+  // while offline. (First-ever connect is handled by the load-once focus effect,
+  // gated by hasLoadedRef, so this won't double-fire on startup.)
+  const wasConnectedRef = useRef(false);
+  useEffect(() => {
+    if (connected && !wasConnectedRef.current && hasLoadedRef.current) {
+      doSearch(searchParamsRef.current);
+    }
+    wasConnectedRef.current = connected;
+  }, [connected, doSearch]);
 
   // Debounced search on query change
   const onSearchChange = useCallback((text: string) => {
@@ -774,6 +798,7 @@ export default function GalleryScreen() {
     setLoading(true); setError('');
     setItems([]); setTotalItems(0);
     setThumbs({}); thumbRequested.current.clear();
+    lanFallbackRef.current.clear();   // don't carry LAN→relay fallbacks across searches
     searchParamsRef.current = { keyword: '', tags: [], rating: 0, folderId: '' };
     remoteWS.requestPoseSearch({ refItemId });
   }, []);
@@ -804,14 +829,38 @@ export default function GalleryScreen() {
   const [thumbsVersion, setThumbsVersion] = useState(0);
   useEffect(() => { setThumbsVersion(v => v + 1); }, [thumbs]);
 
+  // Per-item LAN→relay fallback: ids whose LAN thumb URL failed to load are
+  // switched to a relay-delivered base64 thumb instead.
+  const lanFallbackRef = useRef<Set<string>>(new Set());
+
+  // Layered recovery when a cell's image fails to load. Rate-limited to one
+  // retry per THUMB_RETRY_MS per id so a persistently bad payload can't loop:
+  //   - LAN thumb failed          → fall back to a relay thumbnail for this item
+  //   - relay thumb failed/corrupt → drop it and re-request (self-heal also retries)
+  const onThumbError = useCallback((id: string) => {
+    const last = thumbRequested.current.get(id);
+    if (last != null && Date.now() - last < THUMB_RETRY_MS) return;
+    if (fileServerUrl != null && !lanFallbackRef.current.has(id)) {
+      lanFallbackRef.current.add(id);
+    } else {
+      setThumbs(prev => {
+        if (!(id in prev)) return prev;
+        const n = { ...prev }; delete n[id]; return n;
+      });
+    }
+    thumbRequested.current.set(id, Date.now());
+    remoteWS.requestThumbnail(id);
+  }, [fileServerUrl]);
+
   const renderCell = useCallback(({ item }: { item: LibraryItem }) => {
-    const thumbUrl = fileServerUrl
+    const thumbUrl = (fileServerUrl != null && !lanFallbackRef.current.has(item.id))
       ? `${fileServerUrl}/thumb/${item.id}`
       : thumbsRef.current[item.id];
     return (
       <MemoCell
         item={item}
         thumb={thumbUrl}
+        onThumbError={onThumbError}
         selectMode={selectMode}
         selected={selectedIds.has(item.id)}
         onPress={() => {
@@ -835,7 +884,7 @@ export default function GalleryScreen() {
   // thumbsVersion is included so WAN base64 arrivals trigger a re-render of
   // cells (otherwise they'd be stuck on placeholder until another state change).
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fileServerUrl, selectMode, selectedIds, toggleSelected, enterSelectMode, thumbsVersion]);
+  }, [fileServerUrl, selectMode, selectedIds, toggleSelected, enterSelectMode, thumbsVersion, onThumbError]);
 
   if (!connected) {
     const isConnecting = wsState === 'connecting';
@@ -1156,6 +1205,17 @@ export default function GalleryScreen() {
         />
       )}
 
+      {/* Import source picker (branded action sheet, replaces native Alert) */}
+      <AuraActionSheet
+        visible={importSheetVisible}
+        title="添加素材"
+        onClose={() => setImportSheetVisible(false)}
+        options={[
+          { label: '拍照', icon: Camera, onPress: importFromCamera },
+          { label: '从相册选', icon: ImageIcon, onPress: importFromGallery },
+        ]}
+      />
+
       {/* Import progress modal */}
       <ImportProgressModal
         state={importState}
@@ -1422,10 +1482,11 @@ function TagPickerSheet({ visible, tags, activeTags, onToggle,
 
 // --- Grid Cell (memo + thumb via ref to avoid re-render cascade) ---
 
-function CellInner({ item, thumb, selectMode, selected, onPress, onLongPress }: {
+function CellInner({ item, thumb, selectMode, selected, onPress, onLongPress, onThumbError }: {
   item: LibraryItem; thumb?: string;
   selectMode: boolean; selected: boolean;
   onPress: () => void; onLongPress: () => void;
+  onThumbError?: (id: string) => void;
 }) {
   const ar = item.width && item.height ? item.width / item.height : 1;
   const h = Math.min(COL_W / ar, COL_W * 2.5);
@@ -1454,6 +1515,7 @@ function CellInner({ item, thumb, selectMode, selected, onPress, onLongPress }: 
                 transition={0}
                 cachePolicy="memory-disk"
                 placeholder={item.blurhash ? { blurhash: item.blurhash } : undefined}
+                onError={() => onThumbError?.(item.id)}
               />
             : <ImageIcon size={24} color={colors.text.muted} />}
           {/* Selection checkbox overlay — only visible in select mode */}

@@ -22,6 +22,7 @@ export default function RootLayout() {
               }}
             >
               <Stack.Screen name="(tabs)" />
+              <Stack.Screen name="onboarding" options={{ headerShown: false, gestureEnabled: false }} />
               <Stack.Screen name="auth/login" options={{ headerShown: false }} />
             </Stack>
             {/* Lightbox overlays the entire app when activeLightbox != null. */}

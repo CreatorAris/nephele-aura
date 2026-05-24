@@ -14,6 +14,11 @@ type Listener = (msg: RemoteMessage) => void;
 type StateListener = (state: ConnectionState) => void;
 type AuthInvalidListener = () => void;
 type DesktopListener = (online: boolean) => void;
+// How images/thumbs reach us once paired: 'lan' = direct to the desktop's
+// local file server (fast, full quality); 'relay' = thumbnails proxied over the
+// relay server; null = not yet determined / disconnected.
+export type TransportMode = 'lan' | 'relay' | null;
+type TransportListener = (mode: TransportMode) => void;
 
 // How long to wait for desktop to respond to our initial status query before
 // concluding it's offline. The relay accepts our WebSocket regardless of
@@ -31,6 +36,8 @@ export class RemoteWebSocket {
   private reconnectDelay = 3000;
   private authInvalid = false;  // sticky — stops reconnect loop until re-login
   private desktopOnline = false;
+  private transport: TransportMode = null;
+  private transportListeners: Set<TransportListener> = new Set();
   private desktopProbeTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
@@ -38,10 +45,16 @@ export class RemoteWebSocket {
    */
   async connect(): Promise<void> {
     if (this.state === 'connecting' || this.state === 'connected') return;
+    // Claim 'connecting' BEFORE the async token fetch — otherwise a second
+    // connect() arriving during the await still sees 'disconnected', passes the
+    // guard, and opens a duplicate socket. Two mobile sockets make the relay
+    // replace each other ("1000 replaced") in an endless reconnect loop.
+    this.setState('connecting');
 
     const token = await getToken();
     if (!token) {
       console.log('[WS] No token, skipping connect');
+      this.setState('disconnected');
       this.handleAuthInvalid();
       return;
     }
@@ -49,12 +62,12 @@ export class RemoteWebSocket {
     // Preflight: catch expired tokens before the server has to 401 us
     if (isTokenExpired(token)) {
       console.log('[WS] Token expired locally, redirecting to login');
+      this.setState('disconnected');
       this.handleAuthInvalid();
       return;
     }
 
     this.authInvalid = false;
-    this.setState('connecting');
 
     try {
       this.ws = new WebSocket(`${RELAY_URL}?token=${token}&device=mobile`);
@@ -117,6 +130,14 @@ export class RemoteWebSocket {
           this.handleAuthInvalid();
           return;
         }
+        // A clean "replaced" close (code 1000) means a newer connection — another
+        // device, or our own newer socket — took over this session. Auto-
+        // reconnecting here just fights it and ping-pongs forever. Stay down;
+        // a deliberate connect() (tab focus / manual) can bring us back.
+        if (event.code === 1000 && reason.toLowerCase().includes('replaced')) {
+          console.log('[WS] Replaced by a newer connection — not auto-reconnecting');
+          return;
+        }
         this.scheduleReconnect();
       };
 
@@ -177,8 +198,31 @@ export class RemoteWebSocket {
   private setDesktopOnline(online: boolean): void {
     if (this.desktopOnline === online) return;
     this.desktopOnline = online;
+    if (!online) this.setTransport(null);   // transport unknown once desktop drops
     this.desktopListeners.forEach(fn => {
       try { fn(online); } catch (e) { console.warn('[WS] desktop listener err', e); }
+    });
+  }
+
+  /**
+   * Transport mode (LAN direct vs relay) — set by the gallery after probing the
+   * desktop's file servers; surfaced in the UI so the user knows how images flow.
+   */
+  onTransportChange(fn: TransportListener): () => void {
+    this.transportListeners.add(fn);
+    fn(this.transport);
+    return () => this.transportListeners.delete(fn);
+  }
+
+  getTransport(): TransportMode {
+    return this.transport;
+  }
+
+  setTransport(mode: TransportMode): void {
+    if (this.transport === mode) return;
+    this.transport = mode;
+    this.transportListeners.forEach(fn => {
+      try { fn(mode); } catch (e) { console.warn('[WS] transport listener err', e); }
     });
   }
 

@@ -4,7 +4,9 @@ import { FloatingTabBar } from '../../components/FloatingTabBar';
 import { useEffect, useRef } from 'react';
 import { BackHandler, ToastAndroid, Platform } from 'react-native';
 import { useNavigation } from 'expo-router';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { isLoggedIn, logout } from '../../utils/auth';
+import { ONBOARDED_KEY } from '../onboarding';
 import { remoteWS } from '../../utils/websocket';
 
 export default function TabLayout() {
@@ -19,6 +21,10 @@ export default function TabLayout() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      // First-run intro takes priority over the auth gate — show it once,
+      // before login, on a fresh install.
+      const onboarded = await AsyncStorage.getItem(ONBOARDED_KEY);
+      if (!onboarded && !cancelled) { router.replace('/onboarding'); return; }
       const ok = await isLoggedIn();
       if (!ok && !cancelled) router.replace('/auth/login');
     })();

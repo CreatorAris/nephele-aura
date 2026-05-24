@@ -1,7 +1,7 @@
-import { Pressable, Alert } from 'react-native';
+import { Pressable } from 'react-native';
 import { YStack, XStack, Text } from 'tamagui';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { ChevronRight, Info } from 'lucide-react-native';
+import { ChevronRight, Info, MonitorSmartphone, LogOut } from 'lucide-react-native';
 import { router, useFocusEffect } from 'expo-router';
 import { useState, useCallback, useEffect } from 'react';
 import Constants from 'expo-constants';
@@ -11,7 +11,8 @@ import {
 } from '../../utils/auth';
 import { remoteWS } from '../../utils/websocket';
 import { colors } from '../../theme/colors';
-import { TAB_BAR_CLEARANCE } from '../../components/FloatingTabBar';
+import { GlassCard } from '../../components/GlassCard';
+import { AuraDialog } from '../../components/AuraDialog';
 
 function describeConnection(state: ReturnType<typeof remoteWS.getState>, desktopOnline: boolean) {
   if (state === 'connecting') return { label: '连接中', color: colors.status.warning };
@@ -58,6 +59,9 @@ export default function ProfileScreen() {
   const [licenseLoading, setLicenseLoading] = useState(false);
   const [wsState, setWsState] = useState(() => remoteWS.getState());
   const [desktopOnline, setDesktopOnline] = useState(() => remoteWS.getDesktopOnline());
+  const [aboutVisible, setAboutVisible] = useState(false);
+  const [logoutVisible, setLogoutVisible] = useState(false);
+  const [transport, setTransport] = useState(() => remoteWS.getTransport());
 
   useFocusEffect(
     useCallback(() => {
@@ -87,7 +91,8 @@ export default function ProfileScreen() {
   useEffect(() => {
     const unsubState = remoteWS.onStateChange(setWsState);
     const unsubDesktop = remoteWS.onDesktopStateChange(setDesktopOnline);
-    return () => { unsubState(); unsubDesktop(); };
+    const unsubTransport = remoteWS.onTransportChange(setTransport);
+    return () => { unsubState(); unsubDesktop(); unsubTransport(); };
   }, []);
 
   const handleHeroPress = () => {
@@ -95,155 +100,129 @@ export default function ProfileScreen() {
     router.push('/auth/login');
   };
 
-  const handleLogout = () => {
-    Alert.alert('退出登录', '确定要退出登录吗？', [
-      { text: '取消', style: 'cancel' },
-      {
-        text: '退出',
-        style: 'destructive',
-        onPress: async () => {
-          await logout();
-          setLoggedIn(false);
-          setUser(null);
-          setLicense(null);
-        },
-      },
-    ]);
+  const doLogout = async () => {
+    await logout();
+    setLoggedIn(false);
+    setUser(null);
+    setLicense(null);
   };
 
-  const showAbout = () => {
-    const version = Constants.expoConfig?.version ?? '1.0.0';
-    Alert.alert(
-      'Nephele Aura',
-      `版本 ${version}\n\n画师的移动伴侣\n配合桌面端 Nephele Workshop\n\n反馈：support@creatoraris.com\nMIT 开源`,
-      [{ text: '好' }],
-    );
-  };
 
   const connection = describeConnection(wsState, desktopOnline);
+  // Logical transport label (no hostnames) — tells the user how images flow.
+  const transportLabel = transport === 'lan' ? '局域网直连' : transport === 'relay' ? '服务器中转' : '';
   const isPaid = !!license?.valid && license.tier !== 'free';
+  // 云晶 is a unified, non-expiring pool — no cap, so no "/limit" or progress bar.
   const creditsRemaining = license?.credits_remaining ?? 0;
-  const creditsLimit = license?.credits_limit ?? 50000;
   const purchasedCredits = license?.purchased_credits ?? 0;
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: colors.bg.canvas }}>
-      {/* Identity hero — email-only. Nickname is a system fallback
-          (email.split('@')[0]) not a user-set label, so showing it would
-          be the same kind of lie as showing the app icon as an avatar. */}
+    <SafeAreaView edges={['top']} style={{ flex: 1, backgroundColor: colors.bg.canvas }}>
+      {/* Identity header — email only. Tier lives in the account card below,
+          so we don't repeat it here as a pill. */}
       <Pressable onPress={handleHeroPress} disabled={loggedIn}>
-        <YStack alignItems="center" paddingTop={48} paddingHorizontal="$4" paddingBottom={8}>
-          <Text color={colors.text.primary} fontSize={22} fontWeight="600">
+        <YStack alignItems="center" paddingTop={40} paddingBottom={28} gap={10}>
+          <Text color={colors.text.primary} fontSize={22} fontWeight="700">
             {loggedIn ? (user?.email || '用户') : '未登录'}
           </Text>
           {!loggedIn && (
-            <Text color={colors.text.tertiary} fontSize={14} marginTop={6}>
-              点击登录账号
-            </Text>
+            <Text color={colors.text.tertiary} fontSize={14}>点击登录账号</Text>
           )}
         </YStack>
       </Pressable>
 
-      <YStack height={32} />
-
-      {/* Account card — membership + Nepheline live together as a single
-          "account state" surface, separated by a hairline so each section
-          keeps a clear label without inflating into two same-sized cards
-          (which made the screen read as a flat list with no hierarchy). */}
-      {loggedIn && (
-        <YStack
-          backgroundColor={colors.bg.surface}
-          borderRadius="$3"
-          marginHorizontal="$4"
-          marginBottom="$4"
-          paddingHorizontal="$4"
-        >
-          {/* Membership section */}
-          <YStack paddingTop="$3" paddingBottom={isPaid ? "$3" : "$3"}>
-            <Text color={colors.text.tertiary} fontSize={12} marginBottom={6}>会员</Text>
-            {licenseLoading && !license ? (
-              <Text color={colors.text.tertiary} fontSize={15}>加载中…</Text>
-            ) : isPaid ? (
-              <XStack alignItems="baseline" gap={10}>
-                <Text color={colors.text.primary} fontSize={17} fontWeight="600">
-                  {formatTier(license?.tier ?? '')}
-                </Text>
-                {license?.expires_at && (
-                  <Text color={colors.text.tertiary} fontSize={13}>
-                    {formatExpiry(license.expires_at)}
+      <YStack paddingHorizontal="$4" gap="$3.5">
+        {/* Account — membership + 云晶 in one glass card. */}
+        {loggedIn && (
+          <GlassCard style={{ padding: 0, gap: 0 }}>
+            <YStack paddingHorizontal="$4" paddingVertical="$3.5">
+              <Text color={colors.text.tertiary} fontSize={12} marginBottom={6}>会员</Text>
+              {licenseLoading && !license ? (
+                <Text color={colors.text.tertiary} fontSize={16}>加载中…</Text>
+              ) : isPaid ? (
+                <XStack alignItems="baseline" gap={10}>
+                  <Text color={colors.text.primary} fontSize={18} fontWeight="700">
+                    {formatTier(license?.tier ?? '')}
                   </Text>
-                )}
-              </XStack>
-            ) : (
-              <Text color={colors.text.primary} fontSize={17} fontWeight="600">未激活</Text>
-            )}
-          </YStack>
-
-          {/* Hairline divider — only when there's a Nepheline section below */}
-          {isPaid && (
-            <YStack height={1} backgroundColor={colors.border.hairline} />
-          )}
-
-          {/* Nepheline (云晶) section */}
-          {isPaid && (
-            <YStack paddingTop="$3" paddingBottom="$3">
-              <Text color={colors.text.tertiary} fontSize={12} marginBottom={6}>云晶</Text>
-              <XStack alignItems="baseline" gap={6}>
-                <Text color={colors.text.primary} fontSize={26} fontWeight="600">
-                  {creditsRemaining.toLocaleString()}
-                </Text>
-                <Text color={colors.text.tertiary} fontSize={13}>
-                  / {creditsLimit.toLocaleString()}
-                </Text>
-                {purchasedCredits > 0 && (
-                  <Text color={colors.text.tertiary} fontSize={13} marginLeft="auto">
-                    + {purchasedCredits.toLocaleString()} 已购
-                  </Text>
-                )}
-              </XStack>
+                  {license?.expires_at && (
+                    <Text color={colors.text.tertiary} fontSize={13}>{formatExpiry(license.expires_at)}</Text>
+                  )}
+                </XStack>
+              ) : (
+                <Text color={colors.text.primary} fontSize={18} fontWeight="700">未激活</Text>
+              )}
             </YStack>
-          )}
-        </YStack>
-      )}
 
-      {/* Settings card — runtime status + entry rows. One card with hairline
-          divider mirrors iOS Settings' grouping pattern. */}
-      <YStack
-        backgroundColor={colors.bg.surface}
-        borderRadius="$3"
-        marginHorizontal="$4"
-        overflow="hidden"
-      >
-        <XStack paddingVertical="$3" paddingHorizontal="$4" alignItems="center" gap={12}>
-          <YStack width={8} height={8} borderRadius={4} backgroundColor={connection.color} />
-          <Text flex={1} color={colors.text.primary} fontSize={15}>桌面端 · {connection.label}</Text>
-        </XStack>
-        <YStack height={1} backgroundColor={colors.border.hairline} marginLeft={44} />
-        <Pressable onPress={showAbout}>
-          <XStack paddingVertical="$3" paddingHorizontal="$4" alignItems="center" gap={12}>
-            <Info size={18} color={colors.brand.primary} />
-            <Text flex={1} color={colors.text.primary} fontSize={15}>关于</Text>
-            <ChevronRight size={18} color={colors.text.faint} />
+            {isPaid && (
+              <>
+                <YStack height={1} backgroundColor="rgba(206,172,224,0.12)" />
+                <YStack paddingHorizontal="$4" paddingVertical="$3.5">
+                  <XStack alignItems="center" marginBottom={6}>
+                    <Text flex={1} color={colors.text.tertiary} fontSize={12}>云晶</Text>
+                    {purchasedCredits > 0 && (
+                      <Text color={colors.text.tertiary} fontSize={12}>含已购 {purchasedCredits.toLocaleString()}</Text>
+                    )}
+                  </XStack>
+                  <Text color={colors.text.primary} fontSize={30} fontWeight="700">
+                    {creditsRemaining.toLocaleString()}
+                  </Text>
+                </YStack>
+              </>
+            )}
+          </GlassCard>
+        )}
+
+        {/* Settings — tmui x-cell rows (bare colored icon + title + value/arrow) */}
+        <GlassCard style={{ padding: 0, gap: 0 }}>
+          <XStack paddingVertical={12} paddingHorizontal="$4" alignItems="center" gap={12}>
+            <MonitorSmartphone size={20} color={colors.brand.primary} />
+            <YStack flex={1} gap={2}>
+              <Text color={colors.text.primary} fontSize={15}>桌面端</Text>
+              {transportLabel ? (
+                <Text color={colors.text.tertiary} fontSize={12}>{transportLabel}</Text>
+              ) : null}
+            </YStack>
+            <Text color={connection.color} fontSize={13}>{connection.label}</Text>
+            <YStack width={8} height={8} borderRadius={4} backgroundColor={connection.color} />
           </XStack>
-        </Pressable>
+          <YStack height={1} backgroundColor="rgba(206,172,224,0.10)" marginLeft={48} />
+          <Pressable onPress={() => setAboutVisible(true)}>
+            <XStack paddingVertical={14} paddingHorizontal="$4" alignItems="center" gap={12}>
+              <Info size={20} color={colors.brand.primary} />
+              <Text flex={1} color={colors.text.primary} fontSize={15}>关于</Text>
+              <ChevronRight size={18} color={colors.text.faint} />
+            </XStack>
+          </Pressable>
+        </GlassCard>
+
+        {/* Logout — flows right after settings (NOT pinned to the screen bottom,
+            so it can never collide with the floating tab bar / raised upload FAB). */}
+        {loggedIn && (
+          <Pressable onPress={() => setLogoutVisible(true)}>
+            <GlassCard style={{ padding: 0 }}>
+              <XStack paddingVertical={14} paddingHorizontal="$4" alignItems="center" justifyContent="center" gap={10}>
+                <LogOut size={18} color={colors.status.danger} />
+                <Text color={colors.status.danger} fontSize={15} fontWeight="600">退出登录</Text>
+              </XStack>
+            </GlassCard>
+          </Pressable>
+        )}
       </YStack>
 
-      <YStack flex={1} />
-
-      {loggedIn && (
-        <Pressable onPress={handleLogout}>
-          <YStack
-            backgroundColor={colors.bg.surface}
-            borderRadius="$3"
-            marginHorizontal="$4"
-            marginBottom={TAB_BAR_CLEARANCE}
-            padding="$4"
-            alignItems="center"
-          >
-            <Text color={colors.status.danger} fontSize={15}>退出登录</Text>
-          </YStack>
-        </Pressable>
-      )}
+      <AuraDialog visible={aboutVisible} title="Nephele Aura"
+        onClose={() => setAboutVisible(false)} confirmLabel="好">
+        <YStack alignItems="center" gap={12} paddingTop={2}>
+          <Text fontSize={13} color={colors.text.tertiary}>
+            版本 {Constants.expoConfig?.version ?? '1.0.0'}
+          </Text>
+          <Text fontSize={14} color={colors.text.secondary} textAlign="center" lineHeight={21}>
+            画师的移动伴侣{'\n'}配合桌面端 Nephele Workshop
+          </Text>
+          <Text fontSize={12} color={colors.text.tertiary}>support@creatoraris.com · MIT 开源</Text>
+        </YStack>
+      </AuraDialog>
+      <AuraDialog visible={logoutVisible} title="退出登录" message="确定要退出当前账号吗？"
+        onClose={() => setLogoutVisible(false)} cancelLabel="取消" confirmLabel="退出" onConfirm={doLogout} danger />
     </SafeAreaView>
   );
 }
