@@ -3,7 +3,8 @@ import {
   BackHandler, Platform, StyleSheet, Alert, View, Keyboard,
 } from 'react-native';
 import { Image } from 'expo-image';
-import { FlashList } from '@shopify/flash-list';
+import { FlashList, type FlashListProps } from '@shopify/flash-list';
+import { BlurView } from 'expo-blur';
 import PagerView from 'react-native-pager-view';
 import { LinearGradient as ExpoLinearGradient } from 'expo-linear-gradient';
 import { YStack, XStack, Text, Spinner, Button, Input } from 'tamagui';
@@ -22,6 +23,7 @@ import Animated, {
   useSharedValue, useAnimatedStyle,
   withRepeat, withSequence, withTiming,
   FadeIn, FadeOut,
+  useAnimatedScrollHandler, interpolate, Extrapolation,
 } from 'react-native-reanimated';
 import { remoteWS, RemoteMessage, RemoteWebSocket } from '../../utils/websocket';
 import { isLoggedIn } from '../../utils/auth';
@@ -65,6 +67,16 @@ const PAGE_SIZE = 40;
 // Re-request a visible WAN thumb if it hasn't arrived within this window — a
 // lost response (relay flap / dropped base64) must not blank a cell forever.
 const THUMB_RETRY_MS = 6000;
+
+// Collapsing-header geometry (px). Search row = field 44 + pad 14 + 12.
+const SEARCH_ROW_H = 70;
+const CHIPS_ROW_H = 46;
+
+// createAnimatedComponent drops FlashList's generic, defaulting data to
+// unknown[]; re-assert the item type so renderItem/keyExtractor stay typed.
+const AnimatedFlashList = Animated.createAnimatedComponent(
+  FlashList as unknown as React.ComponentClass<FlashListProps<LibraryItem>>,
+);
 const INFO_H = 26;
 
 function fmtSize(b: number) {
@@ -131,6 +143,20 @@ export default function GalleryScreen() {
     });
     return () => sub.remove();
   }, []);
+
+  // --- Collapsing frosted header (scroll-driven) ---
+  const insets = useSafeAreaInsets();
+  const headerTop = insets.top + SEARCH_ROW_H + CHIPS_ROW_H;       // expanded header height
+  const listTopPad = selectMode ? insets.top + 56 : headerTop;     // content starts below header
+  const scrollY = useSharedValue(0);
+  const scrollHandler = useAnimatedScrollHandler((e) => { scrollY.value = e.contentOffset.y; });
+  // Search row collapses as you scroll down (1:1 with scroll so it "rolls up"
+  // with the content); chips row stays.
+  const searchCollapseStyle = useAnimatedStyle(() => ({
+    height: interpolate(scrollY.value, [0, SEARCH_ROW_H], [SEARCH_ROW_H, 0], Extrapolation.CLAMP),
+    opacity: interpolate(scrollY.value, [0, SEARCH_ROW_H * 0.7], [1, 0], Extrapolation.CLAMP),
+    overflow: 'hidden',
+  }));
   const [folders, setFolders] = useState<LibraryFolder[]>([]);
   const [allTags, setAllTags] = useState<{ name: string; count: number }[]>([]);
   const [activeFolder, setActiveFolder] = useState<LibraryFolder | null>(null);
@@ -855,7 +881,36 @@ export default function GalleryScreen() {
   }
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: colors.bg.canvas }}>
+    <View style={{ flex: 1, backgroundColor: colors.bg.canvas }}>
+      {/* Frosted collapsing header overlay — the list scrolls UP behind it
+          (its paddingTop reserves the expanded header height). Same frosted
+          glass as the tab bar; search row folds away on scroll, chips stay. */}
+      <Animated.View style={{ position: 'absolute', top: 0, left: 0, right: 0, zIndex: 10 }}>
+        {/* iOS: real system blur (UIVisualEffectView) — true frosted glass,
+            zero crash. Android: NO crash-free backdrop-blur primitive exists
+            (RenderEffect blurs a view's own content, not what's behind it;
+            the only backdrop path is dimezis' per-frame snapshot, which
+            crashes + janks behind a recycling masonry list). So Android gets
+            a multi-layer faux-glass: low top alpha lets images bleed through,
+            high bottom alpha keeps chip/text contrast, + a top highlight rim
+            and a bottom hairline to read as a glass edge. */}
+        {Platform.OS === 'ios' ? (
+          <BlurView intensity={40} tint="dark" style={StyleSheet.absoluteFill} />
+        ) : (
+          <ExpoLinearGradient
+            colors={['rgba(58,52,90,0.55)', 'rgba(42,38,70,0.86)', 'rgba(36,34,60,0.96)']}
+            locations={[0, 0.55, 1]}
+            start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
+            style={StyleSheet.absoluteFill}
+          />
+        )}
+        <View style={{
+          paddingTop: insets.top,
+          borderBottomWidth: StyleSheet.hairlineWidth,
+          borderBottomColor: 'rgba(255,255,255,0.07)',
+        }}>
+          {/* top highlight rim — a 1px lit edge sells the "glass" read */}
+          <View style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 1, backgroundColor: 'rgba(255,255,255,0.06)' }} pointerEvents="none" />
       {selectMode ? (
         /* Select-mode header: replaces search/actions row entirely while
             multi-select is active. Filter chips + count row are also
@@ -871,9 +926,9 @@ export default function GalleryScreen() {
           </Text>
         </XStack>
       ) : (
-        /* Normal header — search bar + import + kebab. Pull-to-refresh
-            replaces the old refresh icon button; kebab toggles select mode
-            (will expand to a real action sheet once a second entry lands). */
+        /* Normal header — search bar. Collapses 1:1 with scroll (height→0)
+            so it "rolls up" with the content; the chips row below stays. */
+        <Animated.View style={searchCollapseStyle}>
         <XStack paddingHorizontal={16} paddingTop={14} paddingBottom={12} gap={14} alignItems="center">
           <XStack flex={1} backgroundColor="transparent" borderRadius={8} paddingLeft={12}
             alignItems="center" borderWidth={1} overflow="hidden"
@@ -905,6 +960,7 @@ export default function GalleryScreen() {
             </Animated.View>
           )}
         </XStack>
+        </Animated.View>
       )}
 
       {/* Filter row — folder chip + combined filter chip (tag + rating live
@@ -944,11 +1000,13 @@ export default function GalleryScreen() {
           <Text color={colors.status.error} fontSize={13}>{error}</Text>
         </YStack>
       ) : null}
+        </View>
+      </Animated.View>
 
       {loading ? (
-        <SkeletonGrid />
+        <SkeletonGrid topPad={listTopPad} />
       ) : (
-        <FlashList
+        <AnimatedFlashList
           data={items}
           numColumns={2}
           masonry
@@ -958,7 +1016,9 @@ export default function GalleryScreen() {
           // key. Index keys break when items grows (loadMore append), causing
           // cells to misidentify which item they're rendering after recycle.
           keyExtractor={(item: LibraryItem) => item.id}
-          contentContainerStyle={{ paddingHorizontal: PAD, paddingBottom: TAB_BAR_CLEARANCE }}
+          contentContainerStyle={{ paddingHorizontal: PAD, paddingTop: listTopPad, paddingBottom: TAB_BAR_CLEARANCE }}
+          onScroll={scrollHandler}
+          scrollEventThrottle={16}
           onEndReached={loadMore}
           onEndReachedThreshold={0.5}
           onViewableItemsChanged={onViewableItemsChanged}
@@ -1101,7 +1161,7 @@ export default function GalleryScreen() {
         state={importState}
         onDismiss={() => setImportState({ stage: 'idle' })}
       />
-    </SafeAreaView>
+    </View>
   );
 }
 
@@ -1445,7 +1505,7 @@ function SkeletonBlock({ h, pulseStyle }: {
   );
 }
 
-function SkeletonGrid() {
+function SkeletonGrid({ topPad = 4 }: { topPad?: number }) {
   const opacity = useSharedValue(0.45);
   useEffect(() => {
     opacity.value = withRepeat(
@@ -1463,7 +1523,7 @@ function SkeletonGrid() {
   const left = heights.filter((_, i) => i % 2 === 0);
   const right = heights.filter((_, i) => i % 2 === 1);
   return (
-    <XStack paddingHorizontal={PAD} paddingTop={4}>
+    <XStack paddingHorizontal={PAD} paddingTop={topPad + 4}>
       <YStack flex={1} marginRight={GAP / 2}>
         {left.map((h, i) => <SkeletonBlock key={`l-${i}`} h={h} pulseStyle={pulseStyle} />)}
       </YStack>

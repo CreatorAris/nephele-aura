@@ -53,7 +53,8 @@
         {
           "cameraPermission": "Nephele 需要相机权限以扫描桌面二维码登录。"
         }
-      ]
+      ],
+      "./plugins/withReleaseSigning"
     ]
   }
 }
