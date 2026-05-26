@@ -1,4 +1,5 @@
 import { getToken, isTokenExpired } from './auth';
+import analytics from './analytics';
 
 const RELAY_URL = 'wss://ws.arisfusion.com/ws';
 
@@ -82,6 +83,8 @@ export class RemoteWebSocket {
       this.ws.onopen = () => {
         console.log('[WS] Connected to relay');
         this.setState('connected');
+        analytics.capture('relay_connected');
+        void analytics.flush();   // surface flap timing promptly, don't wait 15s
         this.reconnectDelay = 3000; // reset backoff
         this.startPing();
         // We're only connected to the CF relay — desktop may or may not be
@@ -124,6 +127,15 @@ export class RemoteWebSocket {
 
       this.ws.onclose = (event) => {
         console.log('[WS] Disconnected:', event.code, event.reason);
+        const closeReason = String(event.reason || '');
+        const reasonKind =
+          (closeReason.includes('401') || closeReason.includes('403')
+            || closeReason.toLowerCase().includes('unauthorized')) ? 'auth' :
+          (event.code === 1000 && closeReason.toLowerCase().includes('replaced')) ? 'replaced' :
+          event.code === 1006 ? 'abnormal' :
+          'normal';
+        analytics.capture('relay_disconnected', { code: event.code, reason_kind: reasonKind });
+        void analytics.flush();   // surface flap timing promptly, don't wait 15s
         this.stopPing();
         this.setState('disconnected');
         this.setDesktopOnline(false);
@@ -230,6 +242,7 @@ export class RemoteWebSocket {
   private setDesktopOnline(online: boolean): void {
     if (this.desktopOnline === online) return;
     this.desktopOnline = online;
+    analytics.capture('desktop_presence_changed', { online });
     if (!online) this.setTransport(null);   // transport unknown once desktop drops
     this.desktopListeners.forEach(fn => {
       try { fn(online); } catch (e) { console.warn('[WS] desktop listener err', e); }
@@ -253,6 +266,7 @@ export class RemoteWebSocket {
   setTransport(mode: TransportMode): void {
     if (this.transport === mode) return;
     this.transport = mode;
+    if (mode) analytics.capture('transport_mode', { mode });  // skip null (reset noise)
     this.transportListeners.forEach(fn => {
       try { fn(mode); } catch (e) { console.warn('[WS] transport listener err', e); }
     });
@@ -317,19 +331,6 @@ export class RemoteWebSocket {
         offset: params.offset || 0,
         limit: params.limit || 40,
       },
-    });
-  }
-
-  /**
-   * Pose-based image search. Pass refItemId (library item) or imageBase64.
-   */
-  requestPoseSearch(params: {
-    refItemId?: string; imageBase64?: string;
-    folderId?: string; threshold?: number;
-  }): boolean {
-    return this.send({
-      type: 'command', action: 'eagle_pose_search',
-      data: params,
     });
   }
 
@@ -443,7 +444,13 @@ export class RemoteWebSocket {
    */
   importFiles(
     urls: string[],
-    options?: { folderId?: string; tags?: string[] },
+    options?: {
+      folderId?: string; tags?: string[]; requestId?: string;
+      // Per-url, index-aligned with `urls`. `names` becomes the Eagle item
+      // name (work title), `sourceUrls` its source link. Omit to let the
+      // desktop fall back to the URL filename (e.g. phone gallery transfers).
+      names?: string[]; sourceUrls?: string[];
+    },
   ): boolean {
     return this.send({
       type: 'command', action: 'eagle_batch_import',
@@ -451,6 +458,11 @@ export class RemoteWebSocket {
         urls,
         folderId: options?.folderId || '',
         tags: options?.tags || [],
+        names: options?.names || [],
+        sourceUrls: options?.sourceUrls || [],
+        // Echoed back in progress/result events so the caller can match the
+        // outcome to this request (and other listeners can ignore it).
+        requestId: options?.requestId || '',
       },
     });
   }
@@ -467,9 +479,13 @@ export class RemoteWebSocket {
     const resp = await fetch(localUri);
     const blob = await resp.blob();
 
+    const token = await getToken();
     const uploadResp = await fetch(url, {
       method: 'PUT',
-      headers: { 'Content-Type': mime },
+      headers: {
+        'Content-Type': mime,
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
       body: blob,
     });
 
