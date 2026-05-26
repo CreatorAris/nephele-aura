@@ -8,6 +8,7 @@
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
     "scheme": "nephele",
+    "runtimeVersion": { "policy": "fingerprint" },
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
@@ -25,7 +26,8 @@
       "edgeToEdgeEnabled": true,
       "usesCleartextTraffic": true,
       "softwareKeyboardLayoutMode": "resize",
-      "package": "com.creatoraris.nephele.aura"
+      "package": "com.creatoraris.nephele.aura",
+      "permissions": ["android.permission.REQUEST_INSTALL_PACKAGES"]
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -54,7 +56,12 @@
           "cameraPermission": "Nephele 需要相机权限以扫描桌面二维码登录。"
         }
       ],
-      "./plugins/withReleaseSigning"
-    ]
+      "./plugins/withReleaseSigning",
+      "./plugins/withJPush",
+      "./plugins/withHmsPush"
+    ],
+    "extra": {
+      "jpushAppKey": "e61a2780f1c7a0072ff5d4f0"
+    }
   }
 }

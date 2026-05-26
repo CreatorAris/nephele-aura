@@ -8,6 +8,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { isLoggedIn, logout } from '../../utils/auth';
 import { ONBOARDED_KEY } from '../onboarding';
 import { remoteWS } from '../../utils/websocket';
+import { initPush } from '../../utils/push';
 
 export default function TabLayout() {
   const lastBack = useRef(0);
@@ -26,7 +27,10 @@ export default function TabLayout() {
       const onboarded = await AsyncStorage.getItem(ONBOARDED_KEY);
       if (!onboarded && !cancelled) { router.replace('/onboarding'); return; }
       const ok = await isLoggedIn();
-      if (!ok && !cancelled) router.replace('/auth/login');
+      if (!ok && !cancelled) { router.replace('/auth/login'); return; }
+      // Logged in (past onboarding/consent) → init push + register token.
+      // No-op until the JPush native module + AppKey are built in (dormant).
+      if (ok && !cancelled) void initPush();
     })();
 
     const unsub = remoteWS.onAuthInvalid(async () => {
@@ -88,9 +92,9 @@ export default function TabLayout() {
       <Tabs.Screen
         name="remote"
         options={{
-          title: '远控',
+          title: '助手',
           tabBarIcon: ({ color, size, focused }) => (
-            <TabIcon name="remote" color={color} size={size} filled={focused} />
+            <TabIcon name="chat" color={color} size={size} filled={focused} />
           ),
         }}
       />

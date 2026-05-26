@@ -6,7 +6,9 @@ import { getToken } from './auth';
 //   发现 (discover) → GET /v1/feed/trending        — Pixiv ranking (daily/
 //                     weekly/monthly) + pixivision spotlights. Stateless,
 //                     read-only, free at cost; never touches the inbox/fanout.
-// Subscribe/unsubscribe stays on desktop; mobile only reads + saves-to-library.
+// Subscription management (list/search/subscribe/unsubscribe) now lives on
+// mobile too (2026-05-27) — the backend endpoints were always generic; the
+// "desktop-only management" was a client choice, reversed for Aura.
 
 const API_BASE = 'https://api.arisfusion.com';
 const CLIENT_TYPE = 'nephele-mobile-v1';   // matches the rest of auth.ts API calls
@@ -236,5 +238,125 @@ export async function fetchPixivisionArticle(articleId: string): Promise<FeedRes
     return { success: true, items, featureDisabled: false };
   } catch {
     return { success: false, items: [], featureDisabled: false };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subscription management (管理：列表 / 搜索 / 关注 / 取关)
+// Same backend endpoints desktop uses — generic, authed by uid.
+// ---------------------------------------------------------------------------
+
+export interface SubscribedArtist {
+  pid: string;
+  name: string;
+}
+
+export interface ArtistSearchResult {
+  pid: string;
+  name: string;
+  avatar: string; // proxied
+  sampleThumbs: string[]; // proxied sample illust thumbs (≤3)
+  sampleCount: number;
+}
+
+/** GET the user's subscribed artists. */
+export async function getSubscriptions(): Promise<{ artists: SubscribedArtist[]; cap: number } | null> {
+  const headers = await authHeaders();
+  if (!headers) return null;
+  try {
+    const res = await fetch(`${API_BASE}/v1/artist/subscriptions`, { headers });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data.success) return null;
+    const artists: SubscribedArtist[] = (Array.isArray(data.artists) ? data.artists : [])
+      .map((a: Record<string, unknown>) => ({ pid: String(a.pid || ''), name: String(a.name || '') }))
+      .filter((a: SubscribedArtist) => a.pid);
+    return { artists, cap: Number(data.cap || 100) };
+  } catch {
+    return null;
+  }
+}
+
+/** Subscribe to a pixiv artist (idempotent server-side). */
+export async function subscribeArtist(pid: string, name = ''): Promise<{ ok: boolean; error?: string }> {
+  const headers = await authHeaders();
+  if (!headers) return { ok: false, error: '未登录' };
+  try {
+    const res = await fetch(`${API_BASE}/v1/artist/subscribe`, {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platform: 'pixiv', user_id: pid, user_name: name }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.success) return { ok: true };
+    return { ok: false, error: data.error || `失败 (${res.status})` };
+  } catch {
+    return { ok: false, error: '网络错误' };
+  }
+}
+
+/** Unsubscribe from a pixiv artist. */
+export async function unsubscribeArtist(pid: string): Promise<boolean> {
+  const headers = await authHeaders();
+  if (!headers) return false;
+  try {
+    const res = await fetch(`${API_BASE}/v1/artist/subscribe`, {
+      method: 'DELETE',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platform: 'pixiv', user_id: pid }),
+    });
+    const data = await res.json().catch(() => ({}));
+    return res.ok && !!data.success;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Search pixiv artists by display name. Rerank exact-name matches first, then
+ * artists that actually have sample works — pixiv's default order surfaces
+ * follower/registration-sorted accounts, not necessarily the real artist.
+ */
+export async function searchArtists(nick: string): Promise<ArtistSearchResult[]> {
+  const headers = await authHeaders();
+  if (!headers || !nick.trim()) return [];
+  try {
+    const res = await fetch(
+      `${API_BASE}/v1/pixiv/user/search?nick=${encodeURIComponent(nick.trim())}`,
+      { headers },
+    );
+    if (!res.ok) return [];
+    const data = await res.json();
+    if (!data.success) return [];
+    const users: ArtistSearchResult[] = (Array.isArray(data.users) ? data.users : [])
+      .map((u: Record<string, any>) => {
+        const samples = Array.isArray(u.sample_illusts) ? u.sample_illusts : [];
+        const thumbs = samples
+          .map((s: Record<string, unknown>) => String(s.url || ''))
+          .filter(Boolean)
+          .slice(0, 3);
+        return {
+          pid: String(u.user_id || u.pid || u.id || ''),
+          name: String(u.user_name || u.name || u.nick || ''),
+          // user_avatar is proxied server-side (the raw field is `profile_img`,
+          // now normalized in the Worker). Raw URLs can't be used directly
+          // (pximg Referer block), so fall back to the first proxied sample
+          // thumb — never the raw avatar — so the row never shows an empty circle.
+          avatar: String(u.user_avatar || '') || thumbs[0] || '',
+          sampleThumbs: thumbs,
+          sampleCount: samples.length,
+        };
+      })
+      .filter((u: ArtistSearchResult) => u.pid);
+
+    const q = nick.trim().toLowerCase();
+    return users.sort((a, b) => {
+      const ax = a.name.toLowerCase() === q ? 1 : 0;
+      const bx = b.name.toLowerCase() === q ? 1 : 0;
+      if (ax !== bx) return bx - ax; // exact name match first
+      return b.sampleCount - a.sampleCount; // then artists who actually have works
+    });
+  } catch {
+    return [];
   }
 }

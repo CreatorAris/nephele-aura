@@ -4,8 +4,8 @@ import { YStack, XStack, Text, Spinner } from 'tamagui';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { FlashList } from '@shopify/flash-list';
 import { Image } from 'expo-image';
-import { Rss, FolderPlus, Check, RotateCcw, ChevronLeft, Sparkles } from 'lucide-react-native';
-import { useFocusEffect } from 'expo-router';
+import { Rss, FolderPlus, Check, RotateCcw, ChevronLeft, Sparkles, UserCog } from 'lucide-react-native';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { colors } from '../../theme/colors';
 import { TAB_BAR_CLEARANCE } from '../../components/FloatingTabBar';
 import {
@@ -48,6 +48,24 @@ function relTime(ts: number): string {
 
 function feedKey(it: FeedItem): string {
   return it.kind === 'article' ? `a${it.article_id}` : `${it.source}:${it.illust_id || it.page_url}`;
+}
+
+// Drop duplicate feedKeys, keeping the first occurrence. A subscription inbox
+// can hold both a backfill snapshot and a later new-post entry for the SAME
+// illust → identical feedKey. Without this, FlashList's keyExtractor +
+// expo-image recyclingKey collide and the duplicate cell renders blank. Inbox
+// is sorted newest-first, so the kept entry is the newer "新作" over the
+// older "订阅时" snapshot.
+function dedupeByKey(items: FeedItem[]): FeedItem[] {
+  const seen = new Set<string>();
+  const out: FeedItem[] = [];
+  for (const it of items) {
+    const k = feedKey(it);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(it);
+  }
+  return out;
 }
 
 // Source badge — distinguishes a subscription new-post / subscribe-time snapshot
@@ -202,6 +220,7 @@ function Chip({ label, active, onPress }: { label: string; active: boolean; onPr
 }
 
 export default function FeedScreen() {
+  const router = useRouter();
   const [tab, setTab] = useState<Tab>('follow');
   const [discoverFilter, setDiscoverFilter] = useState<DiscoverFilter>('daily');
   const [article, setArticle] = useState<{ id: string; title: string } | null>(null);
@@ -269,7 +288,7 @@ export default function FeedScreen() {
     if (token !== reqToken.current) return;   // a newer load supersedes this one
     if (res.featureDisabled) { setStatus('disabled'); setItems([]); return; }
     if (!res.success) { setStatus('error'); return; }
-    setItems(res.items);
+    setItems(dedupeByKey(res.items));
     setStatus('ready');
   }, [tab, discoverFilter, article]);
 
@@ -437,11 +456,20 @@ export default function FeedScreen() {
 
   return (
     <SafeAreaView edges={['top']} style={{ flex: 1, backgroundColor: colors.bg.canvas }}>
-      {/* Segmented tabs */}
-      <XStack marginHorizontal={16} marginTop={10} marginBottom={8} padding={3}
-        borderRadius={11} backgroundColor={colors.bg.subtle}>
-        <SegTab label="关注" active={tab === 'follow'} onPress={() => { setArticle(null); setTab('follow'); }} />
-        <SegTab label="发现" active={tab === 'discover'} onPress={() => setTab('discover')} />
+      {/* Segmented tabs + manage entry (manage shown only on 关注) */}
+      <XStack marginHorizontal={16} marginTop={10} marginBottom={8} alignItems="center" gap={8}>
+        <XStack flex={1} padding={3} borderRadius={11} backgroundColor={colors.bg.subtle}>
+          <SegTab label="关注" active={tab === 'follow'} onPress={() => { setArticle(null); setTab('follow'); }} />
+          <SegTab label="发现" active={tab === 'discover'} onPress={() => setTab('discover')} />
+        </XStack>
+        {tab === 'follow' && (
+          <Pressable onPress={() => router.push('/subscriptions')} hitSlop={8}>
+            <XStack width={42} height={42} borderRadius={12} alignItems="center" justifyContent="center"
+              backgroundColor={colors.bg.subtle} borderWidth={1} borderColor={colors.border.default}>
+              <UserCog size={20} color={colors.brand.primary} />
+            </XStack>
+          </Pressable>
+        )}
       </XStack>
 
       {/* Discover sub-filters / article back row */}
