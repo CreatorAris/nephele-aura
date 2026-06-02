@@ -19,7 +19,9 @@ export type Position = {
 // we drop `type` (avatar variants) and `alt` (a11y label) since Aura's library
 // items are all rectangular photos with the filename as the only label.
 export type ImageSource = {
+  id?: string;                       // library item id — matches async full-image upgrades
   uri: string;                       // full-resolution URL
+  tags?: string[];                   // descriptors carried into the share sheet (work tags / author)
   dimensions: Dimensions | null;     // intrinsic full image size
   thumbUri: string;                  // thumbnail URL used as placeholder
   thumbDimensions: Dimensions | null;

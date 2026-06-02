@@ -14,8 +14,10 @@
 //   - #/alf useTheme / setSystemUITheme      -> backdrop is hardcoded black
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { PixelRatio, Platform, StyleSheet, useWindowDimensions, View } from 'react-native';
+import { PixelRatio, Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
+import { BlurView } from 'expo-blur';
+import { Download, FolderPlus, Share2 } from 'lucide-react-native';
 import { Gesture } from 'react-native-gesture-handler';
 import PagerView from 'react-native-pager-view';
 import Animated, {
@@ -204,6 +206,28 @@ function LightboxView({
   // even after the user swiped to another image.
   const { setLightboxIndex } = useLightboxControls();
 
+  // Optional save actions (save-to-album / save-to-Eagle). Surfaced two ways:
+  // auto-hiding bottom-right buttons (discoverable, then out of the way) + a
+  // long-press menu (re-access after they fade). Opt-in — gallery/feed pass
+  // none, so this whole block is inert for them.
+  const actions = lightbox.actions;
+  const [actionsVisible, setActionsVisible] = useState(!!actions?.length);
+  const [menuVisible, setMenuVisible] = useState(false);
+  useEffect(() => {
+    if (!actions?.length) return;
+    setActionsVisible(true);
+    const t = setTimeout(() => setActionsVisible(false), 2000);
+    return () => clearTimeout(t);
+  }, [actions]);
+  const onLongPressImage = useCallback(() => {
+    if (actions?.length) setMenuVisible(true);
+  }, [actions]);
+  const runAction = useCallback((a: { onPress: (img: ImageSource) => void }) => {
+    setMenuVisible(false);
+    const img = images[imageIndex];
+    if (img) a.onPress(img);
+  }, [images, imageIndex]);
+
   const containerStyle = useAnimatedStyle(() => {
     if (openProgress.get() < 1) {
       return { pointerEvents: 'none', opacity: isAnimated ? 1 : 0 };
@@ -311,6 +335,7 @@ function LightboxView({
                 <LightboxImage
                   onTap={onTap}
                   onZoom={onZoom}
+                  onLongPress={actions?.length ? onLongPressImage : undefined}
                   imageSrc={imageSrc}
                   onRequestClose={handleRequestClose}
                   isScrollViewBeingDragged={isDragging}
@@ -329,6 +354,38 @@ function LightboxView({
           );
         })}
       </PagerView>
+
+      {/* Save actions — auto-hiding bottom-right buttons + long-press menu.
+          Real blur (dimezisBlurView) is safe here: a static Modal overlay, no
+          recycling FlashList behind it (that combo is what crashed on Android). */}
+      {actions?.length ? (
+        <>
+          {actionsVisible && (
+            <View style={styles.cornerActions} pointerEvents="box-none">
+              {actions.map(a => (
+                <Pressable key={a.key} onPress={() => runAction(a)}>
+                  <BlurView intensity={40} tint="dark" experimentalBlurMethod="dimezisBlurView" style={styles.cornerBtn}>
+                    {a.key === 'album' ? <Download size={15} color="#fff" /> : a.key === 'eagle' ? <FolderPlus size={15} color="#fff" /> : a.key === 'share' ? <Share2 size={15} color="#fff" /> : null}
+                    <Text style={styles.cornerLabel}>{a.label}</Text>
+                  </BlurView>
+                </Pressable>
+              ))}
+            </View>
+          )}
+          {menuVisible && (
+            <Pressable style={styles.menuScrim} onPress={() => setMenuVisible(false)}>
+              <BlurView intensity={60} tint="dark" experimentalBlurMethod="dimezisBlurView" style={styles.menuSheet}>
+                {actions.map(a => (
+                  <Pressable key={a.key} onPress={() => runAction(a)} style={styles.menuRow}>
+                    {a.key === 'album' ? <Download size={18} color="#fff" /> : a.key === 'eagle' ? <FolderPlus size={18} color="#fff" /> : a.key === 'share' ? <Share2 size={18} color="#fff" /> : null}
+                    <Text style={styles.menuLabel}>{a.label}</Text>
+                  </Pressable>
+                ))}
+              </BlurView>
+            </Pressable>
+          )}
+        </>
+      ) : null}
     </Animated.View>
   );
 }
@@ -337,6 +394,7 @@ function LightboxImage({
   imageSrc,
   onTap,
   onZoom,
+  onLongPress,
   onRequestClose,
   isScrollViewBeingDragged,
   isScaled,
@@ -353,6 +411,7 @@ function LightboxImage({
   onRequestClose: () => void;
   onTap: () => void;
   onZoom: (scaled: boolean) => void;
+  onLongPress?: () => void;
   isScrollViewBeingDragged: boolean;
   isScaled: boolean;
   isActive: boolean;
@@ -484,6 +543,7 @@ function LightboxImage({
       imageSrc={imageSrc}
       onTap={onTap}
       onZoom={onZoom}
+      onLongPress={onLongPress}
       onRequestClose={onRequestClose}
       onLoad={setFetchedDims}
       isScrollViewBeingDragged={isScrollViewBeingDragged}
@@ -523,6 +583,48 @@ const styles = StyleSheet.create({
   pager: {
     flex: 1,
   },
+  cornerActions: {
+    position: 'absolute',
+    right: 14,
+    bottom: 44,
+    gap: 10,
+    alignItems: 'flex-end',
+  },
+  cornerBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 20,
+    overflow: 'hidden',  // clip the blur to the rounded pill
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+  },
+  cornerLabel: { color: '#fff', fontSize: 13, fontWeight: '600' },
+  menuScrim: {
+    position: 'absolute',
+    top: 0, left: 0, right: 0, bottom: 0,
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+    paddingBottom: 60,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+  },
+  menuSheet: {
+    borderRadius: 16,
+    overflow: 'hidden',
+    minWidth: 220,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+  },
+  menuRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 18,
+    paddingVertical: 15,
+  },
+  menuLabel: { color: '#fff', fontSize: 15, fontWeight: '500' },
 });
 
 function interpolatePx(

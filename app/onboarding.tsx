@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { StyleSheet } from 'react-native';
 import { Image } from 'expo-image';
 import { YStack, XStack, Text } from 'tamagui';
@@ -14,6 +14,7 @@ import {
   type LucideIcon,
 } from 'lucide-react-native';
 import { colors } from '../theme/colors';
+import analytics from '../utils/analytics';
 
 export const ONBOARDED_KEY = 'aura_onboarded';
 
@@ -67,12 +68,17 @@ export default function OnboardingScreen() {
   const [page, setPage] = useState(0);
   const isLast = page === TOTAL - 1;
 
-  const finish = async () => {
+  // Funnel entry — paired with onboarding_page_viewed (per step) and
+  // onboarding_finished (via skip/done) so first-run drop-off is visible.
+  useEffect(() => { analytics.capture('onboarding_started', { total: TOTAL }); }, []);
+
+  const finish = async (via: 'skip' | 'done') => {
+    analytics.capture('onboarding_finished', { via, last_page: page, total: TOTAL });
     try { await AsyncStorage.setItem(ONBOARDED_KEY, '1'); } catch { /* non-fatal */ }
     router.replace('/auth/login');
   };
   const next = () => {
-    if (isLast) finish();
+    if (isLast) finish('done');
     else pagerRef.current?.setPage(page + 1);
   };
 
@@ -80,7 +86,7 @@ export default function OnboardingScreen() {
     <SafeAreaView style={styles.container}>
       <XStack height={44} paddingHorizontal="$4" alignItems="center" justifyContent="flex-end">
         {!isLast && (
-          <Text color={colors.text.tertiary} fontSize={14} pressStyle={{ opacity: 0.6 }} onPress={finish}>
+          <Text color={colors.text.tertiary} fontSize={14} pressStyle={{ opacity: 0.6 }} onPress={() => finish('skip')}>
             跳过
           </Text>
         )}
@@ -90,7 +96,11 @@ export default function OnboardingScreen() {
         ref={pagerRef}
         style={{ flex: 1 }}
         initialPage={0}
-        onPageSelected={(e) => setPage(e.nativeEvent.position)}
+        onPageSelected={(e) => {
+          const pos = e.nativeEvent.position;
+          setPage(pos);
+          if (pos > 0) analytics.capture('onboarding_page_viewed', { page: pos, total: TOTAL });
+        }}
       >
         {/* Page 1 — welcome: name the app + say what it is. */}
         <YStack key="welcome" flex={1} alignItems="center" justifyContent="center" paddingHorizontal="$6" gap="$6">

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Pressable, ScrollView, ActivityIndicator } from 'react-native';
 import { YStack, XStack, Text } from 'tamagui';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -7,10 +7,12 @@ import { ChevronLeft, Search, Check, X, UserPlus } from 'lucide-react-native';
 import { useRouter } from 'expo-router';
 import { colors } from '../theme/colors';
 import { AuraInput } from '../components/AuraInput';
+import { AuraDialog } from '../components/AuraDialog';
 import {
   getSubscriptions, subscribeArtist, unsubscribeArtist, searchArtists,
   type SubscribedArtist, type ArtistSearchResult,
 } from '../utils/subscriptions';
+import { getPushConsent, setPushConsent, initPush } from '../utils/push';
 import analytics from '../utils/analytics';
 
 // Subscription management — list / search / subscribe / unsubscribe. Mobile now
@@ -26,6 +28,13 @@ export default function SubscriptionsScreen() {
   const [results, setResults] = useState<ArtistSearchResult[]>([]);
   const [searching, setSearching] = useState(false);
   const [searched, setSearched] = useState(false);
+
+  // Subscription-push consent dialog — shown once, right after the user's first
+  // subscription (Huawei "订阅类" compliance: push must be opt-in via a dialog
+  // tied to the subscribe action, and declinable). Agreeing enables push for
+  // real; declining registers nothing so fanout never reaches this device.
+  const [consentVisible, setConsentVisible] = useState(false);
+  const denyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // pid set for O(1) "already subscribed" checks in search results.
   const subPids = new Set(subs.map((s) => s.pid));
@@ -61,7 +70,27 @@ export default function SubscriptionsScreen() {
       setSubs((prev) => prev.filter((s) => s.pid !== a.pid));
     } else {
       analytics.capture('aura_artist_subscribe', { pid: a.pid });
+      // First use of push = first artist subscription. Ask for consent the first
+      // time; if already consented (e.g. enabled in settings, which no longer
+      // prompts), lazily request the OS permission now — the genuine first-use
+      // moment. Both no-op once the OS decision has been made.
+      const consent = await getPushConsent();
+      if (consent === null) setConsentVisible(true);
+      else if (consent === 'granted') void initPush({ requestPermission: true });
     }
+  };
+
+  // AuraDialog fires onClose on every dismiss (incl. confirm, which calls
+  // onClose then onConfirm ~60ms later). Tentatively treat a close as "decline"
+  // on a short timer; a confirm cancels it before it fires → no double write.
+  const onConsentClose = () => {
+    setConsentVisible(false);
+    denyTimer.current = setTimeout(() => { void setPushConsent(false); }, 150);
+  };
+  const onConsentConfirm = () => {
+    if (denyTimer.current) { clearTimeout(denyTimer.current); denyTimer.current = null; }
+    // First-use opt-in → this is where the OS notification permission is asked.
+    void setPushConsent(true, { requestPermission: true });
   };
 
   const onUnsubscribe = async (pid: string) => {
@@ -178,6 +207,16 @@ export default function SubscriptionsScreen() {
           ))
         )}
       </ScrollView>
+
+      <AuraDialog
+        visible={consentVisible}
+        title="开启更新推送?"
+        message="关注的画师发布新作品时,第一时间通知你。可随时在设置里关闭。"
+        cancelLabel="暂不"
+        confirmLabel="开启推送"
+        onClose={onConsentClose}
+        onConfirm={onConsentConfirm}
+      />
     </SafeAreaView>
   );
 }

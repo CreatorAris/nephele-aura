@@ -30,6 +30,10 @@ const FAB_SIZE = 52;       // ~mainstream center FAB (was tmui's 60)
 const FAB_RAISE = FAB_SIZE / 2;
 
 export const TAB_BAR_CLEARANCE = TAB_BAR_HEIGHT + BOTTOM_GAP + 18;
+// For FIXED bottom elements (e.g. a chat composer) that must clear the RAISED
+// FAB ball, not just the bar. Caller adds insets.bottom. TAB_BAR_CLEARANCE
+// omits the FAB overhang (fine for scrolled content) — this includes it.
+export const TAB_BAR_RAISED_CLEARANCE = BOTTOM_GAP + TAB_BAR_HEIGHT + FAB_RAISE + 12;
 const POP = { damping: 12, stiffness: 220, mass: 0.6 };
 
 // Rounded rect + concave semicircular notch dipping down at top-center.

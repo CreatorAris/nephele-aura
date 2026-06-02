@@ -54,6 +54,7 @@ type Props = {
   onRequestClose: () => void;
   onTap: () => void;
   onZoom: (isZoomed: boolean) => void;
+  onLongPress?: () => void;
   onLoad: (dims: ImageDimensions) => void;
   isScrollViewBeingDragged: boolean;
   showControls: boolean;
@@ -73,6 +74,7 @@ function ImageItemInner({
   imageSrc,
   onTap,
   onZoom,
+  onLongPress,
   onLoad,
   isScrollViewBeingDragged,
   measureSafeArea,
@@ -249,12 +251,24 @@ function ImageItemInner({
       committedTransform.set(withClampedSpring(finalTransform));
     });
 
+  // Opt-in long-press (save menu). .enabled(false) when no handler so it's
+  // fully inert for callers that don't use it (gallery/feed) — zero gesture
+  // change for them. Distinct from tap (quick) / pan (movement) by timing.
+  const longPress = Gesture.LongPress()
+    .enabled(!!onLongPress)
+    .minDuration(420)
+    .onStart(() => {
+      'worklet';
+      if (onLongPress) runOnJS(onLongPress)();
+    });
+
   const composedGesture = isScrollViewBeingDragged
     ? Gesture.Manual()  // no-op while parent pager is dragging
     : Gesture.Exclusive(
         dismissSwipePan,
         Gesture.Simultaneous(pinch, pan),
         doubleTap,
+        longPress,
         singleTap,
       );
 

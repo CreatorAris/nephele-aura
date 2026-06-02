@@ -15,6 +15,7 @@ type Props = {
   onRequestClose: () => void;
   onTap: () => void;
   onZoom: (scaled: boolean) => void;
+  onLongPress?: () => void;
   onLoad: (dims: Dimensions) => void;
   showControls: boolean;
   imageAspect: number | undefined;

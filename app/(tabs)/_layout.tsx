@@ -8,12 +8,14 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { isLoggedIn, logout } from '../../utils/auth';
 import { ONBOARDED_KEY } from '../onboarding';
 import { remoteWS } from '../../utils/websocket';
-import { initPush } from '../../utils/push';
+import { initPush, getPushConsent } from '../../utils/push';
+import { useSplashReady } from '../../components/AnimatedSplash';
 
 export default function TabLayout() {
   const lastBack = useRef(0);
   const navigation = useNavigation();
   const router = useRouter();
+  const { markReady } = useSplashReady();
 
   // Auth gate: on mount + on WS auth-invalid event, kick to login if the
   // stored token is missing or past its exp. Without this, an expired JWT
@@ -22,15 +24,23 @@ export default function TabLayout() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      // First-run intro takes priority over the auth gate — show it once,
-      // before login, on a fresh install.
-      const onboarded = await AsyncStorage.getItem(ONBOARDED_KEY);
-      if (!onboarded && !cancelled) { router.replace('/onboarding'); return; }
-      const ok = await isLoggedIn();
-      if (!ok && !cancelled) { router.replace('/auth/login'); return; }
-      // Logged in (past onboarding/consent) → init push + register token.
-      // No-op until the JPush native module + AppKey are built in (dormant).
-      if (ok && !cancelled) void initPush();
+      try {
+        // First-run intro takes priority over the auth gate — show it once,
+        // before login, on a fresh install.
+        const onboarded = await AsyncStorage.getItem(ONBOARDED_KEY);
+        if (!onboarded && !cancelled) { router.replace('/onboarding'); return; }
+        const ok = await isLoggedIn();
+        if (!ok && !cancelled) { router.replace('/auth/login'); return; }
+        // Push is enabled only after the user has agreed to subscription-push
+        // (Huawei "订阅类" compliance — the consent dialog lives on the subscribe
+        // flow). Re-arm it on launch only when consent was previously granted; a
+        // fresh user gets no notification prompt until they opt in via subscribe.
+        if (ok && !cancelled && (await getPushConsent()) === 'granted') void initPush();
+      } finally {
+        // Routing decided (or errored) — let the launch splash fade out. Runs
+        // on every branch so the splash never outlives the gate.
+        if (!cancelled) markReady();
+      }
     })();
 
     const unsub = remoteWS.onAuthInvalid(async () => {
@@ -42,7 +52,7 @@ export default function TabLayout() {
       cancelled = true;
       unsub();
     };
-  }, [router]);
+  }, [router, markReady]);
 
   // Double-press back to exit on tab screens
   useEffect(() => {

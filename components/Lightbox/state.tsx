@@ -19,6 +19,15 @@ import {
 
 import { type ImageSource } from './types';
 
+// Per-image action surfaced in the pager as an auto-hiding corner button +
+// long-press menu item. `key` lets the pager pick an icon ('album' / 'eagle');
+// the save logic lives in the caller (kept out of the shared component).
+export type LightboxAction = {
+  key: string;
+  label: string;
+  onPress: (image: ImageSource) => void;
+};
+
 export type Lightbox = {
   id: string;
   images: ImageSource[];
@@ -28,6 +37,10 @@ export type Lightbox = {
   // lightbox's pager position into their own state (e.g. Aura's DetailModal
   // jumps to whatever image the user landed on after swiping).
   onClose?: (finalIndex: number) => void;
+  // Optional per-image actions. When present the pager shows auto-hiding
+  // bottom-right buttons + a long-press menu; callers that omit it (gallery/
+  // feed) get no chrome change.
+  actions?: LightboxAction[];
 };
 
 const LightboxContext = createContext<{
@@ -44,10 +57,14 @@ const LightboxControlContext = createContext<{
   // pass the final index to onClose. Plain function, not async — keep it cheap
   // since it fires on every swipe.
   setLightboxIndex: (i: number) => void;
+  // Patch the active lightbox's image list in place (e.g. swap a thumbnail uri
+  // for a full-resolution one that arrived asynchronously over the relay).
+  updateImages: (fn: (imgs: ImageSource[]) => ImageSource[]) => void;
 }>({
   openLightbox: () => {},
   closeLightbox: () => false,
   setLightboxIndex: () => {},
+  updateImages: () => {},
 });
 LightboxControlContext.displayName = 'LightboxControlContext';
 
@@ -109,6 +126,13 @@ export function LightboxProvider({ children }: React.PropsWithChildren<{}>) {
     currentIndexRef.current = i;
   }, []);
 
+  const updateImages = useCallback(
+    (fn: (imgs: ImageSource[]) => ImageSource[]) => {
+      setActiveLightbox(prev => (prev ? { ...prev, images: fn(prev.images) } : prev));
+    },
+    [],
+  );
+
   const closeLightbox = useCallback(() => {
     const active = activeRef.current;
     const wasActive = !!active;
@@ -122,8 +146,8 @@ export function LightboxProvider({ children }: React.PropsWithChildren<{}>) {
 
   const state = useMemo(() => ({ activeLightbox }), [activeLightbox]);
   const methods = useMemo(
-    () => ({ openLightbox, closeLightbox, setLightboxIndex }),
-    [openLightbox, closeLightbox, setLightboxIndex],
+    () => ({ openLightbox, closeLightbox, setLightboxIndex, updateImages }),
+    [openLightbox, closeLightbox, setLightboxIndex, updateImages],
   );
 
   return (

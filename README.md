@@ -53,7 +53,7 @@ Auth: email OTP. Mobile clients declare `X-Client-Type: nephele-mobile-v1` to by
 
 | Screen | Contents |
 |:---|:---|
-| Gallery | Library folder tree + tag/rating filters + masonry waterfall + pinch-to-zoom lightbox; multi-select batch ops, phone-gallery import, pose search |
+| Gallery | Library folder tree + tag/rating filters + masonry waterfall + pinch-to-zoom lightbox; multi-select batch ops, phone-gallery import |
 | Profile | Email OTP login, logout |
 
 ## Repository layout

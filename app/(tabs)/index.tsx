@@ -13,7 +13,7 @@ import {
   Unplug, Search, CircleX, ImagePlus, X, FolderPlus,
   Images, Check, Folder, SquareCheck, Square,
   Image as ImageIcon, Star, Tag, Trash2, CircleCheck,
-  SlidersHorizontal, Crosshair, Link2, Plus, Camera,
+  SlidersHorizontal, Link2, Plus, Camera,
   CloudOff, RotateCw, Ruler, HardDrive, FileText, ChevronRight,
   type LucideIcon,
 } from 'lucide-react-native';
@@ -29,6 +29,7 @@ import Animated, {
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import { remoteWS, RemoteMessage, RemoteWebSocket } from '../../utils/websocket';
 import { isLoggedIn } from '../../utils/auth';
+import analytics from '../../utils/analytics';
 import { useLightbox, useLightboxControls, type ImageSource as LbImageSource } from '../../components/Lightbox';
 import { colors } from '../../theme/colors';
 import { TAB_BAR_CLEARANCE } from '../../components/FloatingTabBar';
@@ -38,6 +39,7 @@ import { AuraDialog } from '../../components/AuraDialog';
 import { GlassCard } from '../../components/GlassCard';
 import * as ImagePicker from 'expo-image-picker';
 import { useShareIntent } from 'expo-share-intent';
+import { standardImageActions } from '../../utils/lightboxActions';
 
 // --- Types ---
 
@@ -118,7 +120,10 @@ export default function GalleryScreen() {
   // renders as a sibling Modal at screen level (the working pattern).
   const [pendingTrashId, setPendingTrashId] = useState<string | null>(null);
   const [fileServerUrl, setFileServerUrl] = useState<string | null>(null);
-  const { openLightbox: openLightboxControl, closeLightbox: closeLightboxControl } = useLightboxControls();
+  // Full-resolution image urls that arrived via the R2 relay (non-LAN), keyed
+  // by item id. The lightbox swaps its thumbnail uri for these as they land.
+  const [fullImages, setFullImages] = useState<Record<string, string>>({});
+  const { openLightbox: openLightboxControl, closeLightbox: closeLightboxControl, updateImages } = useLightboxControls();
   const { activeLightbox } = useLightbox();
 
   // Multi-select (P2.4): entered via explicit Select button (iOS habit) or
@@ -294,10 +299,12 @@ export default function GalleryScreen() {
   // selected.
   const processAssets = useCallback(async (
     assets: { uri: string; mimeType?: string | null }[],
+    source: 'gallery' | 'camera' | 'share' = 'gallery',
   ) => {
     const total = assets.length;
     const urls: string[] = [];
     let failed = 0;
+    analytics.capture('image_import_started', { source, total });
     setImportState({ stage: 'uploading', current: 0, total, failed: 0 });
 
     for (let i = 0; i < assets.length; i++) {
@@ -340,7 +347,7 @@ export default function GalleryScreen() {
         quality: 1,
       });
       if (picked.canceled || picked.assets.length === 0) return;
-      await processAssets(picked.assets);
+      await processAssets(picked.assets, 'gallery');
     } catch (e) {
       console.warn('[import] aborted', e);
       setImportState({ stage: 'idle' });
@@ -361,7 +368,7 @@ export default function GalleryScreen() {
         quality: 1,
       });
       if (picked.canceled || picked.assets.length === 0) return;
-      await processAssets(picked.assets);
+      await processAssets(picked.assets, 'camera');
     } catch (e) {
       console.warn('[import] aborted', e);
       setImportState({ stage: 'idle' });
@@ -385,8 +392,19 @@ export default function GalleryScreen() {
   // etc. via Android system share sheet. Same upload+import pipeline as the
   // in-app gallery picker. Holds off while another import is in flight so we
   // don't trample importState; the intent stays cached until we reset it.
+  // scheme MUST be passed explicitly: expo-share-intent's getScheme() otherwise
+  // falls back to expo-linking createURL(), which throws "expo-linking needs the
+  // expo-constants manifest" whenever Constants.expoConfig is null (release /
+  // OTA bundles). That throw is unhandled and tears down the whole React host →
+  // blank/gray screen on the next foreground (and a hard crash on background).
+  // Passing scheme short-circuits getScheme before it ever touches createURL,
+  // covering every path (background auto-reset, manual reset, foreground
+  // refresh). resetOnBackground:false additionally matches the "intent stays
+  // cached until we reset it" intent — note: OMITTING it does NOT disable it
+  // (default is true; the lib checks `!== false`), so it must be set explicitly.
   const { hasShareIntent, shareIntent, resetShareIntent } = useShareIntent({
-    resetOnBackground: true,
+    scheme: 'nephele',
+    resetOnBackground: false,
   });
   useEffect(() => {
     if (!hasShareIntent || !shareIntent?.files?.length) return;
@@ -401,7 +419,7 @@ export default function GalleryScreen() {
       resetShareIntent();
       return;
     }
-    processAssets(assets).finally(() => resetShareIntent());
+    processAssets(assets, 'share').finally(() => resetShareIntent());
   }, [hasShareIntent, shareIntent, importState.stage, processAssets, resetShareIntent]);
 
   // Ref so the import listener can call doSearch (declared later) without
@@ -412,6 +430,9 @@ export default function GalleryScreen() {
   useEffect(() => {
     const unsub = remoteWS.onMessage(msg => {
       if (msg.type !== 'event' || !msg.data) return;
+      // Imports tagged with a requestId belong to another surface (e.g. the
+      // feed's per-card save) — the gallery's own picker import sends none.
+      if ((msg.data as { requestId?: string }).requestId) return;
       if (msg.action === 'eagle_batch_import_progress') {
         const d = msg.data as { index?: number; total?: number };
         setImportState(prev => prev.stage === 'importing'
@@ -419,6 +440,11 @@ export default function GalleryScreen() {
           : prev);
       } else if (msg.action === 'eagle_batch_import_result') {
         const d = msg.data as { processed?: number; failed?: number; total?: number };
+        analytics.capture('image_import_result', {
+          processed: d.processed ?? 0,
+          failed: d.failed ?? 0,
+          total: d.total ?? 0,
+        });
         setImportState({
           stage: 'done',
           processed: d.processed ?? 0,
@@ -458,18 +484,25 @@ export default function GalleryScreen() {
     (targetItem: LibraryItem, thumbRef: AnimatedRef<any>) => {
       const idx = items.findIndex(i => i.id === targetItem.id);
       if (idx < 0) return;
+      analytics.capture('lightbox_open', {
+        index: idx,
+        total: items.length,
+        transport: remoteWS.getTransport(),
+      });
       const lbImages: LbImageSource[] = items.map((it, i) => {
         const dims = it.width && it.height
           ? { width: it.width, height: it.height }
           : null;
         const fullUri = fileServerUrl
           ? `${fileServerUrl}/full/${it.id}`
-          : (thumbs[it.id] ?? '');
+          : (fullImages[it.id] ?? thumbs[it.id] ?? '');
         const thumbUri = fileServerUrl
           ? `${fileServerUrl}/thumb/${it.id}`
           : (thumbs[it.id] ?? '');
         return {
+          id: it.id,
           uri: fullUri,
+          tags: it.tags,
           dimensions: dims,
           thumbUri,
           thumbDimensions: dims,
@@ -481,6 +514,7 @@ export default function GalleryScreen() {
       openLightboxControl({
         images: lbImages,
         index: idx,
+        actions: standardImageActions(),
         // When the lightbox closes we land back in the DetailModal — but if
         // the user swiped to a different image, the modal would otherwise
         // still show the originally-tapped item. Mirror the lightbox's final
@@ -491,8 +525,15 @@ export default function GalleryScreen() {
           if (tgt) setDetailItem(tgt);
         },
       });
+
+      // Non-LAN: the lightbox opened on the (512px) thumbnail. Ask the desktop
+      // to push the full-resolution original through the R2 relay; the
+      // eagle_full_image handler swaps it in when it lands.
+      if (!fileServerUrl && !fullImages[targetItem.id]) {
+        remoteWS.requestFullImage(targetItem.id);
+      }
     },
-    [items, fileServerUrl, thumbs, openLightboxControl],
+    [items, fileServerUrl, thumbs, fullImages, openLightboxControl],
   );
 
   // Pending rollback listeners — each updateItemOptimistic registers one on
@@ -624,20 +665,19 @@ export default function GalleryScreen() {
           return [...prev, ...newItems.filter(i => !seen.has(i.id))];
         });
       }
-      if (msg.action === 'eagle_pose_search') {
-        if (loadWatchdog.current) { clearTimeout(loadWatchdog.current); loadWatchdog.current = null; }
-        setLoading(false);
-        const d = msg.data as { success?: boolean; message?: string; items?: LibraryItem[] };
-        if (!d.success) { setError(d.message || 'Pose search failed'); return; }
-        setError('');
-        const poseItems = d.items || [];
-        setItems(poseItems);
-        setTotalItems(poseItems.length);
-      }
       if (msg.action === 'eagle_thumbnail') {
         const d = msg.data as { itemId?: string; data?: string; mime?: string };
         if (d.itemId && d.data) {
           setThumbs(prev => ({ ...prev, [d.itemId!]: `data:${d.mime || 'image/png'};base64,${d.data}` }));
+        }
+      }
+      if (msg.action === 'eagle_full_image') {
+        const d = msg.data as { itemId?: string; url?: string; error?: string };
+        if (d.itemId && d.url) {
+          const id = d.itemId, fullUrl = d.url;
+          setFullImages(prev => (prev[id] ? prev : { ...prev, [id]: fullUrl }));
+          // If the lightbox is open on this item, swap its source to full-res.
+          updateImages(imgs => imgs.map(im => (im.id === id ? { ...im, uri: fullUrl } : im)));
         }
       }
       // Folder mutations (P2.5): refetch folder list when the server confirms
@@ -791,6 +831,13 @@ export default function GalleryScreen() {
     setSearchQuery(text);
     if (searchTimer.current) clearTimeout(searchTimer.current);
     searchTimer.current = setTimeout(() => {
+      // Keyword text itself is intentionally NOT sent — high-cardinality + PII.
+      analytics.capture('gallery_search', {
+        has_keyword: text.trim().length > 0,
+        tag_count: activeTags.length,
+        rating: activeRating,
+        has_folder: !!activeFolder,
+      });
       doSearch({
         keyword: text,
         tags: activeTags,
@@ -807,6 +854,11 @@ export default function GalleryScreen() {
     setActiveFolder(folder);
     setActiveTags(tags);
     setActiveRating(rating);
+    analytics.capture('filter_applied', {
+      tag_count: tags.length,
+      rating,
+      has_folder: !!folder,
+    });
     doSearch({
       keyword: searchQuery,
       tags,
@@ -851,26 +903,6 @@ export default function GalleryScreen() {
         activeRating > 0 ? `${activeRating}+` : null,
       ].filter(Boolean).join(' · ')
     : '筛选';
-
-  const doPoseSearch = useCallback((refItemId: string) => {
-    setDetailItem(null);
-    setSearchQuery('');
-    setActiveFolder(null);
-    setActiveTags([]);
-    setActiveRating(0);
-    setLoading(true); setError('');
-    setItems([]); setTotalItems(0);
-    setThumbs({}); thumbRequested.current.clear();
-    lanFallbackRef.current.clear();   // don't carry LAN→relay fallbacks across searches
-    searchParamsRef.current = { keyword: '', tags: [], rating: 0, folderId: '' };
-    retryLoadRef.current = () => remoteWS.requestPoseSearch({ refItemId });
-    if (!remoteWS.requestPoseSearch({ refItemId })) {
-      if (loadWatchdog.current) { clearTimeout(loadWatchdog.current); loadWatchdog.current = null; }
-      setLoading(false); setError('桌面端未连接');
-      return;
-    }
-    armWatchdog();
-  }, [armWatchdog]);
 
   // Refs for loadMore stale closure fix
   const itemsRef = useRef(items);
@@ -1302,8 +1334,7 @@ export default function GalleryScreen() {
           onClose={() => setDetailItem(null)}
           onOpenLightbox={openLightboxAt}
           onUpdateItem={updateItemOptimistic}
-          onTrash={(id) => setPendingTrashId(id)}
-          onPoseSearch={doPoseSearch} />
+          onTrash={(id) => setPendingTrashId(id)} />
       )}
 
       {/* Delete confirm — sibling Modal at screen level (NOT nested in
@@ -1947,7 +1978,7 @@ function FolderNameDialog({ state, onSubmit, onClose }: {
 // archaeology, in case we want to revisit a more distinct voice later.
 
 function DetailModal({ item, items, getThumb, onClose, onOpenLightbox,
-                      onIndexChange, onUpdateItem, onTrash, onPoseSearch }: {
+                      onIndexChange, onUpdateItem, onTrash }: {
   item: LibraryItem | null;
   items: LibraryItem[];
   getThumb: (id: string) => string | undefined;
@@ -1958,7 +1989,6 @@ function DetailModal({ item, items, getThumb, onClose, onOpenLightbox,
   onIndexChange: (i: number) => void;
   onUpdateItem?: (itemId: string, fields: Partial<LibraryItem>) => void;
   onTrash?: (itemId: string) => void;
-  onPoseSearch?: (itemId: string) => void;
 }) {
   // Ref to the big-image wrapper. Measured by Lightbox.openLightbox in the
   // UI thread to derive the hero animation start rect. Always rebinds to
@@ -2358,16 +2388,6 @@ function DetailModal({ item, items, getThumb, onClose, onOpenLightbox,
             borderTopColor={colors.border.hairline}
             gap={12}
           >
-            {onPoseSearch && (
-              <Pressable style={({ pressed }) => ({ flex: 1, opacity: pressed ? 0.7 : 1 })}
-                onPress={() => onPoseSearch(item.id)}>
-                <XStack height={46} borderRadius={12} backgroundColor={colors.brand.soft}
-                  alignItems="center" justifyContent="center" gap={7}>
-                  <Crosshair size={17} color={colors.brand.primary} />
-                  <Text fontSize={14} fontWeight="600" color={colors.brand.primary}>姿势搜索</Text>
-                </XStack>
-              </Pressable>
-            )}
             {onTrash && (
               <Pressable style={({ pressed }) => ({ flex: 1, opacity: pressed ? 0.7 : 1 })}
                 onPress={() => onTrash(item.id)}>

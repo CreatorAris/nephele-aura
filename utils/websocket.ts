@@ -288,6 +288,70 @@ export class RemoteWebSocket {
     return this.send({ type: 'query', action: 'status' });
   }
 
+  // ─── Agent (desktop Cloud MAX, full power) ──────────────────────────
+  // Drives the desktop's agentic loop over the relay — same path the desktop
+  // UI uses, so it reaches the LOCAL Eagle library / files / run_python that
+  // /v1/chat/max can't. Desktop forwards back agent_stream_chunk / agent_thinking
+  // / tool_call_started|finished / agent_result / agent_error / credits_updated
+  // (see core/remote_bridge.py forward_* methods); subscribe via onMessage.
+  // NOTE: run_python on desktop blocks on a desktop-side confirmation dialog —
+  // when nobody's at the desktop the agent simply stalls (by design, fail-safe).
+
+  /**
+   * Send a message to the desktop's Cloud MAX agent. `history` is prior turns
+   * as `{role, content}[]`; an optional uploaded-image URL (see uploadImage)
+   * attaches it to the prompt. agentMode is 'cloud_max' to match the desktop's
+   * MAX button exactly — the full agentic loop with cloud_search registered,
+   * billing + recording consistent with desktop. (Plain 'cloud' runs the same
+   * loop but skips enable_cloud_max_mode, so cloud_search wouldn't be available.)
+   */
+  sendAgent(
+    text: string,
+    opts?: { deepThink?: boolean; history?: { role: string; content: string }[]; imageUrl?: string },
+  ): boolean {
+    return this.send({
+      type: 'command', action: 'agent_send',
+      data: {
+        text,
+        agentMode: 'cloud_max',
+        deepThink: opts?.deepThink ?? false,
+        history: opts?.history ?? [],
+        ...(opts?.imageUrl ? { imageSource: 'upload', imageUrl: opts.imageUrl } : {}),
+      },
+    });
+  }
+
+  /**
+   * Best-effort abort of the in-flight desktop agent task. The desktop worker
+   * may not support cancellation mid-tool; treat as advisory.
+   */
+  abortAgent(): boolean {
+    return this.send({ type: 'command', action: 'agent_abort' });
+  }
+
+  /** Request the desktop chat-history session list (→ `chat_sessions` event). */
+  requestChatSessions(): boolean {
+    return this.send({ type: 'command', action: 'chat_sessions' });
+  }
+
+  /** Load one desktop session's messages (→ `chat_session_messages` event). */
+  loadChatSession(sessionId: string): boolean {
+    return this.send({ type: 'command', action: 'chat_session_load', data: { sessionId } });
+  }
+
+  /**
+   * Answer an ask_user_question the desktop agent forwarded (action
+   * `agent_question`). `answers` maps each question's text → the chosen label
+   * (single-select) or labels (multi-select); pass {} to skip/cancel. Routes
+   * to the desktop's answerAgentQuestion — the same path its own dialog uses.
+   */
+  answerQuestion(questionId: string, answers: Record<string, string | string[]>): boolean {
+    return this.send({
+      type: 'command', action: 'agent_answer_question',
+      data: { questionId, answers },
+    });
+  }
+
   // ─── Library browse ─────────────────────────────────────────────────
   // NOTE: action strings (`eagle_*`) are the wire protocol shared with the
   // desktop bridge. Method names dropped the `Eagle` prefix because Aura

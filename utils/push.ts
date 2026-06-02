@@ -5,13 +5,74 @@
 // + consent, not app launch, so the SDK doesn't collect on cold start.
 import { Platform, AppState } from 'react-native';
 import * as Notifications from 'expo-notifications';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getToken } from './auth';
+import analytics from './analytics';
 
 const API_BASE = 'https://api.arisfusion.com';
 const CLIENT_TYPE = 'nephele-mobile-v1'; // matches the authed API calls in auth.ts/subscriptions.ts
 
+// Subscription-push consent (Huawei "服务与通讯类-订阅类" compliance): push is
+// NOT enabled at login. It is gated behind an explicit, declinable dialog shown
+// after the user subscribes (see subscriptions screen), and can be turned off
+// any time in 我的 → 更新推送. Consent has two effects:
+//   • client: only after granting do we initPush() (OS permission + token reg);
+//   • server: a `push_consent:<uid>` flag the fanout checks before sending, so
+//     toggling OFF stops delivery even though the device token stays registered.
+const CONSENT_KEY = 'push_consent'; // 'granted' | 'denied' | unset
+
 let initialized = false;
 let appStateSub: { remove: () => void } | null = null;
+
+/** Read the stored subscription-push consent. null = never asked yet. */
+export async function getPushConsent(): Promise<'granted' | 'denied' | null> {
+  try {
+    const v = await AsyncStorage.getItem(CONSENT_KEY);
+    return v === 'granted' || v === 'denied' ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Mirror the consent flag to the server so fanout can honor it. No-op when
+ *  logged out (consent is only ever set in an authed context). Best-effort. */
+async function syncConsentToServer(granted: boolean): Promise<void> {
+  try {
+    const token = await getToken();
+    if (!token) return;
+    await fetch(`${API_BASE}/v1/aura/push/consent`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+        'X-Client-Type': CLIENT_TYPE,
+      },
+      body: JSON.stringify({ consent: granted }),
+    });
+  } catch (e) {
+    console.warn('[push] consent sync failed', e);
+  }
+}
+
+/**
+ * Record the user's subscription-push consent. On grant: flip the server flag
+ * and enable push for real (initPush → OS permission prompt + token reg). On
+ * decline: flip the server flag off (fanout then skips this user) and register
+ * nothing. Safe to call repeatedly and when push is unconfigured.
+ */
+export async function setPushConsent(
+  granted: boolean,
+  opts?: { requestPermission?: boolean },
+): Promise<void> {
+  try { await AsyncStorage.setItem(CONSENT_KEY, granted ? 'granted' : 'denied'); } catch { /* non-fatal */ }
+  analytics.capture('push_consent_set', { granted });
+  await syncConsentToServer(granted);
+  // The OS notification permission is requested ONLY at first use (first artist
+  // subscription), never from the settings toggle or app launch — the caller
+  // signals that moment via opts.requestPermission. initPush itself just wires
+  // up JPush + token registration.
+  if (granted) await initPush({ requestPermission: opts?.requestPermission });
+}
 
 // Resolve the native module lazily. Absent (not yet built with the plugin) →
 // null → all push calls become no-ops.
@@ -45,17 +106,24 @@ export function clearBadge(): void {
  * logged in; if not logged in yet, registration is skipped and should be retried
  * post-login via registerPushToken().
  */
-export async function initPush(): Promise<void> {
-  if (initialized) return;
+export async function initPush(opts?: { requestPermission?: boolean }): Promise<void> {
   const JPush = getJPush();
   if (!JPush) return; // native module absent → dormant
-  try {
-    // Ask for notification permission (Android 13+, and Huawei EMUI prompts on
-    // 12 too). Without this, the OS silently drops every notification even
-    // though JPush delivered it. Don't block on the result — registration can
-    // proceed regardless; the user can still grant later in settings.
-    try { await Notifications.requestPermissionsAsync(); } catch { /* non-fatal */ }
 
+  // OS notification permission is requested ONLY when the caller is at the
+  // first-use moment (opts.requestPermission). This sits ABOVE the `initialized`
+  // guard so a later first-use can still prompt even if JPush was already wired
+  // up token-side on a prior launch. Android/iOS suppress the dialog once the
+  // user has decided, so calling it again is a no-op, not a re-prompt.
+  if (opts?.requestPermission) {
+    try {
+      const perm = await Notifications.requestPermissionsAsync();
+      analytics.capture('push_permission', { granted: perm.status === 'granted' });
+    } catch { /* non-fatal */ }
+  }
+
+  if (initialized) return;
+  try {
     JPush.init?.();
     JPush.setLoggerEnable?.(false);
     initialized = true;
@@ -109,7 +177,7 @@ export async function registerPushToken(registrationId: string): Promise<void> {
   try {
     const token = await getToken();
     if (!token) return; // not logged in — caller retries after login
-    await fetch(`${API_BASE}/v1/aura/push/register`, {
+    const res = await fetch(`${API_BASE}/v1/aura/push/register`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -118,6 +186,7 @@ export async function registerPushToken(registrationId: string): Promise<void> {
       },
       body: JSON.stringify({ registration_id: registrationId, platform: Platform.OS }),
     });
+    if (res.ok) analytics.capture('push_registered', { platform: Platform.OS });
   } catch (e) {
     console.warn('[push] register failed', e);
   }

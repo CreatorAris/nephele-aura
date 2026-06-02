@@ -16,6 +16,7 @@ import { remoteWS } from '../../utils/websocket';
 import { AuraDialog } from '../../components/AuraDialog';
 import { useLightboxControls, type ImageSource as LbImageSource } from '../../components/Lightbox';
 import analytics from '../../utils/analytics';
+import { standardImageActions } from '../../utils/lightboxActions';
 
 type Status = 'loading' | 'ready' | 'error' | 'disabled';
 type SaveState = 'idle' | 'saving' | 'saved' | 'failed';
@@ -319,6 +320,9 @@ export default function FeedScreen() {
     const images: LbImageSource[] = illusts.map((it) => {
       const dims = it.width && it.height ? { width: it.width, height: it.height } : null;
       return {
+        // Bake the share descriptors onto the image: work tags + author name
+        // (author as lightweight attribution since feed items are others' works).
+        tags: [...(it.tags || []), it.user_name].filter((t): t is string => !!t && !!t.trim()),
         uri: it.large_proxied || it.thumb_proxied,   // master1200 original (fallback thumb)
         dimensions: dims,
         thumbUri: it.thumb_proxied,
@@ -329,7 +333,11 @@ export default function FeedScreen() {
       };
     });
     analytics.capture('lightbox_open', { source: item.source, index: idx, total: images.length });
-    openLightbox({ images, index: idx });
+    openLightbox({
+      images,
+      index: idx,
+      actions: standardImageActions(),
+    });
   }, [openLightbox]);
 
   // Tap save → confirm dialog first (discloses 入库 + tags + desktop requirement).

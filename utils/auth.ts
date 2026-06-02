@@ -1,4 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import analytics from './analytics';
 
 const API_BASE = 'https://api.arisfusion.com';
 const CLIENT_TYPE = 'nephele-mobile-v1';
@@ -124,6 +125,11 @@ export async function verifyCode(email: string, code: string): Promise<LoginResu
       [STORAGE_KEYS.userInfo, JSON.stringify(user)],
     ]);
 
+    if (user.uid) {
+      analytics.identify(user.uid, { email: user.email, login_method: 'email' });
+    }
+    analytics.capture('mobile_login', { method: 'email', success: true });
+
     return { success: true, message: '登录成功', user };
   } catch (e) {
     return { success: false, message: '网络错误，请检查连接' };
@@ -173,6 +179,8 @@ export async function isLoggedIn(): Promise<boolean> {
 }
 
 export async function logout(): Promise<void> {
+  analytics.capture('mobile_logout');
+  analytics.reset();
   await AsyncStorage.multiRemove([
     STORAGE_KEYS.accessToken,
     STORAGE_KEYS.refreshToken,
@@ -239,6 +247,12 @@ export async function exchangePairingToken(token: string): Promise<LoginResult> 
       [STORAGE_KEYS.refreshToken, data.refresh_token || ''],
       [STORAGE_KEYS.userInfo, JSON.stringify(user)],
     ]);
+
+    if (user.uid) {
+      analytics.identify(user.uid, { email: user.email, login_method: 'qr_pairing' });
+    }
+    analytics.capture('mobile_login', { method: 'qr_pairing', success: true });
+
     return { success: true, message: '登录成功', user };
   } catch (e) {
     return { success: false, message: '网络错误，请检查连接' };

@@ -8,11 +8,22 @@
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
     "scheme": "nephele",
-    "runtimeVersion": { "policy": "fingerprint" },
+    "runtimeVersion": {
+      "policy": "fingerprint"
+    },
+    "updates": {
+      "url": "https://api.arisfusion.com/v1/aura/ota/manifest",
+      "enabled": true,
+      "fallbackToCacheTimeout": 0,
+      "checkAutomatically": "NEVER",
+      "requestHeaders": {
+        "expo-channel-name": "production"
+      }
+    },
     "splash": {
-      "image": "./assets/splash-icon.png",
+      "image": "./assets/splash-blank.png",
       "resizeMode": "contain",
-      "backgroundColor": "#0f0f1a"
+      "backgroundColor": "#1A1438"
     },
     "ios": {
       "supportsTablet": true,
@@ -21,13 +32,15 @@
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#0f0f1a"
+        "backgroundColor": "#1A1438"
       },
       "edgeToEdgeEnabled": true,
       "usesCleartextTraffic": true,
       "softwareKeyboardLayoutMode": "resize",
       "package": "com.creatoraris.nephele.aura",
-      "permissions": ["android.permission.REQUEST_INSTALL_PACKAGES"]
+      "permissions": [
+        "android.permission.REQUEST_INSTALL_PACKAGES"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -36,6 +49,15 @@
       "expo-router",
       "expo-font",
       "expo-asset",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-blank.png",
+          "imageWidth": 180,
+          "resizeMode": "contain",
+          "backgroundColor": "#1A1438"
+        }
+      ],
       [
         "expo-image-picker",
         {
@@ -46,8 +68,12 @@
       [
         "expo-share-intent",
         {
-          "androidIntentFilters": ["image/*"],
-          "androidMultiIntentFilters": ["image/*"]
+          "androidIntentFilters": [
+            "image/*"
+          ],
+          "androidMultiIntentFilters": [
+            "image/*"
+          ]
         }
       ],
       [
@@ -58,7 +84,9 @@
       ],
       "./plugins/withReleaseSigning",
       "./plugins/withJPush",
-      "./plugins/withHmsPush"
+      "./plugins/withHmsPush",
+      "./plugins/withFcm",
+      "expo-secure-store"
     ],
     "extra": {
       "jpushAppKey": "e61a2780f1c7a0072ff5d4f0"

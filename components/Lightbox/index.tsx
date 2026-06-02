@@ -9,6 +9,7 @@ import { useLightbox, useLightboxControls } from './state';
 import LightboxRoot from './pager/ImagePager';
 
 export { LightboxProvider, useLightbox, useLightboxControls } from './state';
+export type { LightboxAction } from './state';
 export type { ImageSource, Dimensions } from './types';
 
 export function Lightbox() {
