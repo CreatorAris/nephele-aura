@@ -86,6 +86,7 @@
       "./plugins/withJPush",
       "./plugins/withHmsPush",
       "./plugins/withFcm",
+      "./plugins/withBlockedPermissions",
       "expo-secure-store"
     ],
     "extra": {
