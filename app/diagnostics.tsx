@@ -29,14 +29,15 @@ function DiagRow({ item, last }: { item: DiagItem; last: boolean }) {
     <>
       <XStack paddingVertical={13} paddingHorizontal="$4" alignItems="center" gap={12}>
         <Icon size={20} color={color} />
-        <YStack flex={1} gap={2}>
+        <YStack flexShrink={1} gap={2}>
           <Text color={colors.text.primary} fontSize={15}>{item.label}</Text>
           {item.hint ? (
             <Text color={color} fontSize={12}>{item.hint}</Text>
           ) : null}
         </YStack>
-        <Text color={colors.text.tertiary} fontSize={13} maxWidth={170} numberOfLines={1}
-          textAlign="right">
+        {/* Full value, wraps to multiple lines — this is a debug surface, so
+            never elide (was maxWidth+numberOfLines=1, which cut rtv/updateId). */}
+        <Text color={colors.text.tertiary} fontSize={13} flex={1} textAlign="right">
           {item.detail}
         </Text>
       </XStack>

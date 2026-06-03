@@ -135,6 +135,8 @@ export default function GalleryScreen() {
   // bar was hidden behind the tab bar).
   const [batchPanel, setBatchPanel] = useState<'star' | 'tag' | null>(null);
   const [batchTagDraft, setBatchTagDraft] = useState('');
+  // Which branded confirm dialog (if any) is open over the batch bar.
+  const [confirmKind, setConfirmKind] = useState<'autotag' | 'trash' | null>(null);
 
   // Folder create/rename dialog (P2.5)
   type FolderDialogState =
@@ -260,7 +262,7 @@ export default function GalleryScreen() {
   // Select-mode handlers
   const exitSelectMode = useCallback(() => {
     setSelectMode(false); setSelectedIds(new Set());
-    setBatchPanel(null); setBatchTagDraft('');
+    setBatchPanel(null); setBatchTagDraft(''); setConfirmKind(null);
   }, []);
 
   const enterSelectMode = useCallback((seedId?: string) => {
@@ -541,22 +543,11 @@ export default function GalleryScreen() {
     exitSelectMode();
   }, [selectedIds, exitSelectMode]);
 
-  // Confirm wrappers for the destructive / heavy batch actions (the Alerts
-  // used to live in the bottom BatchActionBar, now driven from the top header).
-  const confirmBatchAutoTag = useCallback(() => {
-    Alert.alert(
-      `AI 打标 ${selectedIds.size} 张`,
-      '桌面端会用本地 AI 识别标签 + 风格，写回素材库。需要桌面端在线。',
-      [{ text: '取消', style: 'cancel' }, { text: '开始', onPress: batchAutoTag }],
-    );
-  }, [selectedIds, batchAutoTag]);
-
-  const confirmBatchTrash = useCallback(() => {
-    Alert.alert(
-      `删除 ${selectedIds.size} 张图片`, '将移入回收站',
-      [{ text: '取消', style: 'cancel' }, { text: '删除', style: 'destructive', onPress: batchTrash }],
-    );
-  }, [selectedIds, batchTrash]);
+  // Confirm dialogs for the destructive / heavy batch actions, rendered via the
+  // branded AuraDialog (not native Alert). State-driven so it can use the same
+  // glass surface as the rest of the app.
+  const confirmBatchAutoTag = useCallback(() => setConfirmKind('autotag'), []);
+  const confirmBatchTrash = useCallback(() => setConfirmKind('trash'), []);
 
   const submitBatchTag = useCallback(() => {
     const t = batchTagDraft.trim();
@@ -1513,11 +1504,31 @@ export default function GalleryScreen() {
         onDismiss={() => setImportState({ stage: 'idle' })}
       />
 
-      {/* AI auto-tag progress modal */}
-      <AutoTagProgressModal
+      {/* AI auto-tag progress / result — branded dialog */}
+      <AutoTagDialog
         state={autoTagState}
-        onCancel={() => remoteWS.cancelAutoTag()}
+        onStop={() => {
+          autoTagReqRef.current = '';
+          remoteWS.cancelAutoTag();
+          setAutoTagState({ stage: 'idle' });
+        }}
         onDismiss={() => setAutoTagState({ stage: 'idle' })}
+      />
+
+      {/* Batch action confirms — branded dialog (replaces native Alert) */}
+      <AuraDialog
+        visible={confirmKind !== null}
+        title={confirmKind === 'trash'
+          ? `删除 ${selectedIds.size} 张图片`
+          : `AI 打标 ${selectedIds.size} 张`}
+        message={confirmKind === 'trash'
+          ? '将移入回收站'
+          : '桌面端会用本地 AI 识别标签 + 风格，写回素材库。需要桌面端在线。'}
+        confirmLabel={confirmKind === 'trash' ? '删除' : '开始'}
+        cancelLabel="取消"
+        danger={confirmKind === 'trash'}
+        onConfirm={() => { if (confirmKind === 'trash') batchTrash(); else batchAutoTag(); }}
+        onClose={() => setConfirmKind(null)}
       />
     </View>
   );
@@ -1968,62 +1979,51 @@ function ImportProgressModal({ state, onDismiss }: {
   );
 }
 
-// --- AI auto-tag progress modal ---
+// --- AI auto-tag progress / result — branded AuraDialog ---
 
 type AutoTagStateShape =
   | { stage: 'idle' }
   | { stage: 'running'; index: number; total: number; name: string }
   | { stage: 'done'; success: boolean; tagged: number; skipped: number; failed: number; total: number };
 
-function AutoTagProgressModal({ state, onCancel, onDismiss }: {
+function AutoTagDialog({ state, onStop, onDismiss }: {
   state: AutoTagStateShape;
-  onCancel: () => void;
-  onDismiss: () => void;
+  onStop: () => void;     // running: cancel the run + close
+  onDismiss: () => void;  // done: just close
 }) {
   if (state.stage === 'idle') return null;
   const running = state.stage === 'running';
 
   return (
-    <Modal visible animationType="fade" transparent onRequestClose={running ? undefined : onDismiss}>
-      <Pressable
-        style={{ flex: 1, backgroundColor: colors.overlay.scrimStrong,
-                 justifyContent: 'center', alignItems: 'center' }}
-        onPress={running ? undefined : onDismiss}
-      >
-        <Pressable onPress={e => e.stopPropagation()}
-          style={{ width: '78%', backgroundColor: colors.bg.surface, borderRadius: 14, padding: 22 }}>
-          <Text fontSize={16} fontWeight="600" color={colors.text.primary} marginBottom={12}
-            textAlign="center">{running ? 'AI 打标中' : (state.success ? '打标完成' : '打标未完成')}</Text>
-          {running ? (
-            <YStack alignItems="center" gap={10} paddingVertical={8}>
-              <Spinner size="large" color={colors.brand.primary} />
-              <Text fontSize={14} color={colors.text.secondary}>{state.index} / {state.total}</Text>
-              <Text fontSize={11} color={colors.text.tertiary} numberOfLines={1}>桌面端正在识别</Text>
-              <Pressable onPress={onCancel} hitSlop={6} style={{ marginTop: 10 }}>
-                <Text fontSize={14} color={colors.text.tertiary}>停止</Text>
-              </Pressable>
-            </YStack>
+    <AuraDialog
+      visible
+      title={running ? 'AI 打标中' : (state.success ? '打标完成' : '打标未完成')}
+      confirmLabel={running ? '停止' : '关闭'}
+      danger={running}
+      onClose={running ? onStop : onDismiss}
+    >
+      {running ? (
+        <YStack alignItems="center" gap={10} paddingTop={4}>
+          <Spinner size="large" color={colors.brand.primary} />
+          <Text fontSize={14} color={colors.text.secondary}>{state.index} / {state.total}</Text>
+          <Text fontSize={12} color={colors.text.tertiary} numberOfLines={1}>桌面端正在识别</Text>
+        </YStack>
+      ) : (
+        <YStack alignItems="center" gap={8} paddingTop={4}>
+          {state.success ? (
+            <CircleCheck size={44}
+              color={state.failed === 0 ? colors.status.success : colors.status.warning} />
           ) : (
-            <YStack alignItems="center" gap={8} paddingVertical={8}>
-              {state.success ? (
-                <CircleCheck size={48}
-                  color={state.failed === 0 ? colors.status.success : colors.status.warning} />
-              ) : (
-                <CircleX size={48} color={colors.status.error} />
-              )}
-              <Text fontSize={14} color={colors.text.secondary}>
-                {state.tagged === 0 && !state.success
-                  ? '未能打标,请确认桌面端在线后重试'
-                  : `已打标 ${state.tagged} 张${state.skipped > 0 ? `,跳过 ${state.skipped} 张` : ''}${state.failed > 0 ? `,失败 ${state.failed} 张` : ''}`}
-              </Text>
-              <Pressable onPress={onDismiss} hitSlop={6} style={{ marginTop: 12 }}>
-                <Text fontSize={14} color={colors.brand.primary} fontWeight="600" textAlign="center">关闭</Text>
-              </Pressable>
-            </YStack>
+            <CircleX size={44} color={colors.status.error} />
           )}
-        </Pressable>
-      </Pressable>
-    </Modal>
+          <Text fontSize={14} color={colors.text.secondary} textAlign="center">
+            {state.tagged === 0 && !state.success
+              ? '未能打标，请确认桌面端在线后重试'
+              : `已打标 ${state.tagged} 张${state.skipped > 0 ? `，跳过 ${state.skipped} 张` : ''}${state.failed > 0 ? `，失败 ${state.failed} 张` : ''}`}
+          </Text>
+        </YStack>
+      )}
+    </AuraDialog>
   );
 }
 

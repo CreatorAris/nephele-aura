@@ -93,7 +93,7 @@ export async function runDiagnostics(): Promise<DiagReport> {
     items.push({
       key: 'bundle', label: 'JS 包',
       detail: uid
-        ? `${uid.slice(0, 8)}… · ${created ? created.toLocaleString() : '—'}`
+        ? `${uid} · ${created ? created.toLocaleString() : '—'}`
         : '内置包（未 OTA）',
       status: 'ok', hint: '',
     });
