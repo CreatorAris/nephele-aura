@@ -130,6 +130,11 @@ export default function GalleryScreen() {
   // long-press on a cell (Android habit). Exits on Cancel or Android back.
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  // Batch action panel (star picker / tag input) — lifted out of the old
+  // bottom bar so the actions can live in the top select header (the bottom
+  // bar was hidden behind the tab bar).
+  const [batchPanel, setBatchPanel] = useState<'star' | 'tag' | null>(null);
+  const [batchTagDraft, setBatchTagDraft] = useState('');
 
   // Folder create/rename dialog (P2.5)
   type FolderDialogState =
@@ -255,6 +260,7 @@ export default function GalleryScreen() {
   // Select-mode handlers
   const exitSelectMode = useCallback(() => {
     setSelectMode(false); setSelectedIds(new Set());
+    setBatchPanel(null); setBatchTagDraft('');
   }, []);
 
   const enterSelectMode = useCallback((seedId?: string) => {
@@ -534,6 +540,31 @@ export default function GalleryScreen() {
     for (const id of ids) remoteWS.trashItem(id);
     exitSelectMode();
   }, [selectedIds, exitSelectMode]);
+
+  // Confirm wrappers for the destructive / heavy batch actions (the Alerts
+  // used to live in the bottom BatchActionBar, now driven from the top header).
+  const confirmBatchAutoTag = useCallback(() => {
+    Alert.alert(
+      `AI 打标 ${selectedIds.size} 张`,
+      '桌面端会用本地 AI 识别标签 + 风格，写回素材库。需要桌面端在线。',
+      [{ text: '取消', style: 'cancel' }, { text: '开始', onPress: batchAutoTag }],
+    );
+  }, [selectedIds, batchAutoTag]);
+
+  const confirmBatchTrash = useCallback(() => {
+    Alert.alert(
+      `删除 ${selectedIds.size} 张图片`, '将移入回收站',
+      [{ text: '取消', style: 'cancel' }, { text: '删除', style: 'destructive', onPress: batchTrash }],
+    );
+  }, [selectedIds, batchTrash]);
+
+  const submitBatchTag = useCallback(() => {
+    const t = batchTagDraft.trim();
+    if (!t) return;
+    batchAddTag(t);
+    setBatchTagDraft('');
+    setBatchPanel(null);
+  }, [batchTagDraft, batchAddTag]);
 
   // Build the lightbox image array for all current items and open at the
   // tapped one. thumbRef is only attached to the active image — the others
@@ -1135,6 +1166,7 @@ export default function GalleryScreen() {
             multi-select is active. Filter chips + count row are also
             suppressed below so the chrome reads as a focused batch surface
             (iOS Photos / Pinterest pattern). */
+        <>
         <XStack paddingHorizontal={16} paddingTop={10} paddingBottom={8}
           height={56} alignItems="center" gap={14}>
           <Pressable onPress={exitSelectMode} hitSlop={8}>
@@ -1143,7 +1175,55 @@ export default function GalleryScreen() {
           <Text flex={1} fontSize={16} fontWeight="600" color={colors.text.primary}>
             {selectedIds.size > 0 ? `已选 ${selectedIds.size} 项` : '请选择'}
           </Text>
+          {selectedIds.size > 0 && (
+            <XStack gap={18} alignItems="center">
+              <Pressable onPress={() => setBatchPanel(p => p === 'star' ? null : 'star')} hitSlop={6}>
+                <Star size={22} color={batchPanel === 'star' ? colors.brand.primary : colors.text.secondary} />
+              </Pressable>
+              <Pressable onPress={() => setBatchPanel(p => p === 'tag' ? null : 'tag')} hitSlop={6}>
+                <Tag size={22} color={batchPanel === 'tag' ? colors.brand.primary : colors.text.secondary} />
+              </Pressable>
+              <Pressable onPress={confirmBatchAutoTag} hitSlop={6}>
+                <Sparkles size={22} color={colors.text.secondary} />
+              </Pressable>
+              <Pressable onPress={confirmBatchTrash} hitSlop={6}>
+                <Trash2 size={22} color={colors.status.error} />
+              </Pressable>
+            </XStack>
+          )}
         </XStack>
+        {/* Expandable panel drops down below the header (over the list top) */}
+        {batchPanel === 'star' && (
+          <XStack justifyContent="center" gap={8} paddingHorizontal={16} paddingBottom={10}>
+            {[0, 1, 2, 3, 4, 5].map(n => (
+              <Pressable key={n} hitSlop={6} onPress={() => { batchSetStar(n); setBatchPanel(null); }}>
+                {n === 0 ? (
+                  <XStack backgroundColor={colors.bg.subtle} borderRadius={16}
+                    paddingHorizontal={10} paddingVertical={4}>
+                    <Text fontSize={12} color={colors.text.tertiary}>清除</Text>
+                  </XStack>
+                ) : (
+                  <Star size={26} color={colors.status.warning} fill={colors.status.warning} />
+                )}
+              </Pressable>
+            ))}
+          </XStack>
+        )}
+        {batchPanel === 'tag' && (
+          <XStack alignItems="center" gap={8} paddingHorizontal={16} paddingBottom={10}>
+            <XStack flex={1} backgroundColor={colors.bg.subtle} borderRadius={8} paddingHorizontal={10}>
+              <Input flex={1} value={batchTagDraft} onChangeText={setBatchTagDraft}
+                onSubmitEditing={submitBatchTag} placeholder="输入标签后回车"
+                backgroundColor="transparent" borderWidth={0}
+                color={colors.text.primary} fontSize={14} height={36}
+                autoFocus returnKeyType="done" />
+            </XStack>
+            <Pressable onPress={submitBatchTag} hitSlop={4}>
+              <Text fontSize={13} color={colors.brand.primary} fontWeight="600">添加</Text>
+            </Pressable>
+          </XStack>
+        )}
+        </>
       ) : (
         /* Normal header — search bar. Collapses 1:1 with scroll (height→0)
             so it "rolls up" with the content; the chips row below stays. */
@@ -1413,16 +1493,8 @@ export default function GalleryScreen() {
       {/* Lightbox mounts globally in app/_layout.tsx (overlay); opened via
           useLightboxControls().openLightbox(...). */}
 
-      {/* Batch action bar — shown only in select mode with ≥1 item picked */}
-      {selectMode && selectedIds.size > 0 && (
-        <BatchActionBar
-          count={selectedIds.size}
-          onSetStar={batchSetStar}
-          onAddTag={batchAddTag}
-          onAutoTag={batchAutoTag}
-          onTrash={batchTrash}
-        />
-      )}
+      {/* Batch actions now live in the top select-mode header (the bottom bar
+          was occluded by the tab bar). */}
 
       {/* Import source picker (branded action sheet, replaces native Alert) */}
       <AuraActionSheet
@@ -1819,111 +1891,6 @@ function SkeletonGrid({ topPad = 4 }: { topPad?: number }) {
         {right.map((h, i) => <SkeletonBlock key={`r-${i}`} h={h} pulseStyle={pulseStyle} />)}
       </YStack>
     </XStack>
-  );
-}
-
-// --- Batch action bar (P2.4) ---
-
-type BatchPanelMode = null | 'star' | 'tag';
-
-function BatchActionBar({ count, onSetStar, onAddTag, onAutoTag, onTrash }: {
-  count: number;
-  onSetStar: (star: number) => void;
-  onAddTag: (tag: string) => void;
-  onAutoTag: () => void;
-  onTrash: () => void;
-}) {
-  const insets = useSafeAreaInsets();
-  const [panel, setPanel] = useState<BatchPanelMode>(null);
-  const [tagDraft, setTagDraft] = useState('');
-
-  const confirmAutoTag = () => {
-    Alert.alert(
-      `AI 打标 ${count} 张`,
-      '桌面端会用本地 AI 识别标签 + 风格，写回素材库。需要桌面端在线。',
-      [
-        { text: '取消', style: 'cancel' },
-        { text: '开始', onPress: onAutoTag },
-      ],
-    );
-  };
-
-  const submitTag = () => {
-    const t = tagDraft.trim();
-    if (!t) return;
-    onAddTag(t);
-    setTagDraft('');
-    setPanel(null);
-  };
-
-  const confirmTrash = () => {
-    Alert.alert(
-      `删除 ${count} 张图片`, '将移入回收站',
-      [
-        { text: '取消', style: 'cancel' },
-        { text: '删除', style: 'destructive', onPress: onTrash },
-      ],
-    );
-  };
-
-  return (
-    <YStack position="absolute" left={0} right={0} bottom={0}
-      backgroundColor={colors.bg.surface} paddingTop={10}
-      paddingBottom={(insets.bottom || 0) + 10}
-      paddingHorizontal={16}
-      borderTopWidth={1} borderTopColor={colors.border.subtle}>
-      {/* Expandable panel above the action row */}
-      {panel === 'star' && (
-        <XStack justifyContent="center" gap={8} paddingBottom={10}>
-          {[0, 1, 2, 3, 4, 5].map(n => (
-            <Pressable key={n} hitSlop={6} onPress={() => { onSetStar(n); setPanel(null); }}>
-              {n === 0 ? (
-                <XStack backgroundColor={colors.bg.subtle} borderRadius={16}
-                  paddingHorizontal={10} paddingVertical={4}>
-                  <Text fontSize={12} color={colors.text.tertiary}>清除</Text>
-                </XStack>
-              ) : (
-                <Star size={26} color={colors.status.warning} fill={colors.status.warning} />
-              )}
-            </Pressable>
-          ))}
-        </XStack>
-      )}
-      {panel === 'tag' && (
-        <XStack alignItems="center" gap={8} paddingBottom={10}>
-          <XStack flex={1} backgroundColor={colors.bg.subtle} borderRadius={8} paddingHorizontal={10}>
-            <Input flex={1} value={tagDraft} onChangeText={setTagDraft}
-              onSubmitEditing={submitTag} placeholder="输入标签后回车"
-              backgroundColor="transparent" borderWidth={0}
-              color={colors.text.primary} fontSize={14} height={36}
-              autoFocus returnKeyType="done" />
-          </XStack>
-          <Pressable onPress={submitTag} hitSlop={4}>
-            <Text fontSize={13} color={colors.brand.primary} fontWeight="600">添加</Text>
-          </Pressable>
-        </XStack>
-      )}
-
-      <XStack alignItems="center" justifyContent="space-between">
-        <Text fontSize={13} color={colors.text.secondary}>已选 {count} 项</Text>
-        <XStack gap={18} alignItems="center">
-          <Pressable onPress={() => setPanel(panel === 'star' ? null : 'star')} hitSlop={6}>
-            <Star size={22}
-              color={panel === 'star' ? colors.brand.primary : colors.text.secondary} />
-          </Pressable>
-          <Pressable onPress={() => setPanel(panel === 'tag' ? null : 'tag')} hitSlop={6}>
-            <Tag size={22}
-              color={panel === 'tag' ? colors.brand.primary : colors.text.secondary} />
-          </Pressable>
-          <Pressable onPress={confirmAutoTag} hitSlop={6}>
-            <Sparkles size={22} color={colors.text.secondary} />
-          </Pressable>
-          <Pressable onPress={confirmTrash} hitSlop={6}>
-            <Trash2 size={22} color={colors.status.error} />
-          </Pressable>
-        </XStack>
-      </XStack>
-    </YStack>
   );
 }
 
