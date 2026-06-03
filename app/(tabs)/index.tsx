@@ -346,6 +346,10 @@ export default function GalleryScreen() {
           failed: d.failed || 0, total: d.total || 0,
         });
         analytics.capture('aura_auto_tag_done', { tagged: d.tagged || 0, failed: d.failed || 0 });
+        // Pull the just-written tags back from the desktop so the phone reflects
+        // the index (the desktop updated its library cache; re-run the current
+        // view to sync). Without this the tags only appear after a manual reload.
+        if ((d.tagged || 0) > 0) refreshOnImportRef.current();
       }
     });
     return unsub;
@@ -1520,7 +1524,7 @@ export default function GalleryScreen() {
         visible={confirmKind !== null}
         title={confirmKind === 'trash'
           ? `删除 ${selectedIds.size} 张图片`
-          : `AI 打标 ${selectedIds.size} 张`}
+          : `资源库索引 ${selectedIds.size} 张`}
         message={confirmKind === 'trash'
           ? '将移入回收站'
           : '桌面端会用本地 AI 识别标签 + 风格，写回素材库。需要桌面端在线。'}
@@ -1997,7 +2001,7 @@ function AutoTagDialog({ state, onStop, onDismiss }: {
   return (
     <AuraDialog
       visible
-      title={running ? 'AI 打标中' : (state.success ? '打标完成' : '打标未完成')}
+      title={running ? '资源库索引中' : (state.success ? '索引完成' : '索引未完成')}
       confirmLabel={running ? '停止' : '关闭'}
       danger={running}
       onClose={running ? onStop : onDismiss}
@@ -2006,7 +2010,7 @@ function AutoTagDialog({ state, onStop, onDismiss }: {
         <YStack alignItems="center" gap={10} paddingTop={4}>
           <Spinner size="large" color={colors.brand.primary} />
           <Text fontSize={14} color={colors.text.secondary}>{state.index} / {state.total}</Text>
-          <Text fontSize={12} color={colors.text.tertiary} numberOfLines={1}>桌面端正在识别</Text>
+          <Text fontSize={12} color={colors.text.tertiary} numberOfLines={1}>桌面端正在建立索引</Text>
         </YStack>
       ) : (
         <YStack alignItems="center" gap={8} paddingTop={4}>
@@ -2018,8 +2022,8 @@ function AutoTagDialog({ state, onStop, onDismiss }: {
           )}
           <Text fontSize={14} color={colors.text.secondary} textAlign="center">
             {state.tagged === 0 && !state.success
-              ? '未能打标，请确认桌面端在线后重试'
-              : `已打标 ${state.tagged} 张${state.skipped > 0 ? `，跳过 ${state.skipped} 张` : ''}${state.failed > 0 ? `，失败 ${state.failed} 张` : ''}`}
+              ? '未能索引，请确认桌面端在线后重试'
+              : `已索引 ${state.tagged} 张${state.skipped > 0 ? `，跳过 ${state.skipped} 张` : ''}${state.failed > 0 ? `，失败 ${state.failed} 张` : ''}`}
           </Text>
         </YStack>
       )}
