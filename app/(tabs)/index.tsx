@@ -13,7 +13,7 @@ import {
   Unplug, Search, CircleX, ImagePlus, X, FolderPlus,
   Images, Check, Folder, SquareCheck, Square,
   Image as ImageIcon, Star, Tag, Trash2, CircleCheck,
-  SlidersHorizontal, Link2, Plus, Camera,
+  SlidersHorizontal, Link2, Plus, Camera, Sparkles,
   CloudOff, RotateCw, Ruler, HardDrive, FileText, ChevronRight,
   type LucideIcon,
 } from 'lucide-react-native';
@@ -145,6 +145,14 @@ export default function GalleryScreen() {
     | { stage: 'importing'; uploaded: number; total: number; progress: number; failed: number }
     | { stage: 'done'; processed: number; failed: number; total: number };
   const [importState, setImportState] = useState<ImportState>({ stage: 'idle' });
+  // AI auto-tag (WD14) over the selected items — runs on the desktop, progress
+  // streams back over the relay keyed by autoTagReqRef so stale runs are ignored.
+  type AutoTagState =
+    | { stage: 'idle' }
+    | { stage: 'running'; index: number; total: number; name: string }
+    | { stage: 'done'; success: boolean; tagged: number; skipped: number; failed: number; total: number };
+  const [autoTagState, setAutoTagState] = useState<AutoTagState>({ stage: 'idle' });
+  const autoTagReqRef = useRef('');
   const [importSheetVisible, setImportSheetVisible] = useState(false);
 
   // Search & filter state
@@ -292,6 +300,58 @@ export default function GalleryScreen() {
       remoteWS.updateItem(id, { tags: [...item.tags, t] });
     }
   }, [selectedIds, items]);
+
+  // Batch AI auto-tag — hands the selected ids to the desktop's WD14 tagger
+  // (writes tags + style + the CLIP vector). Progress/result stream back over
+  // the relay; we key on a fresh requestId so a stale run can't drive the modal.
+  const batchAutoTag = useCallback(() => {
+    if (selectedIds.size === 0) return;
+    const ids = Array.from(selectedIds);
+    const req = `at_${Date.now().toString(36)}`;
+    autoTagReqRef.current = req;
+    const ok = remoteWS.autoTag(ids, req);
+    if (!ok) {
+      autoTagReqRef.current = '';
+      Alert.alert('未连接桌面', '请确认桌面端 Nephele 在线后再试');
+      return;
+    }
+    analytics.capture('aura_auto_tag_started', { count: ids.length });
+    setAutoTagState({ stage: 'running', index: 0, total: ids.length, name: '' });
+    exitSelectMode();
+  }, [selectedIds, exitSelectMode]);
+
+  // Relay events for the running auto-tag job (per-item progress + final result).
+  useEffect(() => {
+    const unsub = remoteWS.onMessage((msg: RemoteMessage) => {
+      if (msg.type !== 'event') return;
+      const reqId = autoTagReqRef.current;
+      if (!reqId) return;                                  // no active run — ignore
+      const d = (msg.data || {}) as any;
+      if (d.requestId && d.requestId !== reqId) return;    // a stale/other run
+      if (msg.action === 'eagle_auto_tag_progress') {
+        setAutoTagState({ stage: 'running', index: d.index || 0, total: d.total || 0, name: d.name || '' });
+      } else if (msg.action === 'eagle_auto_tag_result') {
+        autoTagReqRef.current = '';
+        setAutoTagState({
+          stage: 'done', success: !!d.success,
+          tagged: d.tagged || 0, skipped: d.skipped || 0,
+          failed: d.failed || 0, total: d.total || 0,
+        });
+        analytics.capture('aura_auto_tag_done', { tagged: d.tagged || 0, failed: d.failed || 0 });
+      }
+    });
+    return unsub;
+  }, []);
+
+  // Desktop dropped mid-run → release the otherwise non-dismissable modal so
+  // the user isn't trapped (cancel needs the relay, which is what just died).
+  useEffect(() => {
+    if (connected) return;
+    autoTagReqRef.current = '';
+    setAutoTagState(prev => prev.stage === 'running'
+      ? { stage: 'done', success: false, tagged: 0, skipped: 0, failed: prev.total, total: prev.total }
+      : prev);
+  }, [connected]);
 
   // Phone gallery/camera → library import (Phase 3). Sequential R2 upload
   // (concurrency 1 keeps the radio happy and lets us report a meaningful
@@ -1359,6 +1419,7 @@ export default function GalleryScreen() {
           count={selectedIds.size}
           onSetStar={batchSetStar}
           onAddTag={batchAddTag}
+          onAutoTag={batchAutoTag}
           onTrash={batchTrash}
         />
       )}
@@ -1378,6 +1439,13 @@ export default function GalleryScreen() {
       <ImportProgressModal
         state={importState}
         onDismiss={() => setImportState({ stage: 'idle' })}
+      />
+
+      {/* AI auto-tag progress modal */}
+      <AutoTagProgressModal
+        state={autoTagState}
+        onCancel={() => remoteWS.cancelAutoTag()}
+        onDismiss={() => setAutoTagState({ stage: 'idle' })}
       />
     </View>
   );
@@ -1758,15 +1826,27 @@ function SkeletonGrid({ topPad = 4 }: { topPad?: number }) {
 
 type BatchPanelMode = null | 'star' | 'tag';
 
-function BatchActionBar({ count, onSetStar, onAddTag, onTrash }: {
+function BatchActionBar({ count, onSetStar, onAddTag, onAutoTag, onTrash }: {
   count: number;
   onSetStar: (star: number) => void;
   onAddTag: (tag: string) => void;
+  onAutoTag: () => void;
   onTrash: () => void;
 }) {
   const insets = useSafeAreaInsets();
   const [panel, setPanel] = useState<BatchPanelMode>(null);
   const [tagDraft, setTagDraft] = useState('');
+
+  const confirmAutoTag = () => {
+    Alert.alert(
+      `AI 打标 ${count} 张`,
+      '桌面端会用本地 AI 识别标签 + 风格，写回素材库。需要桌面端在线。',
+      [
+        { text: '取消', style: 'cancel' },
+        { text: '开始', onPress: onAutoTag },
+      ],
+    );
+  };
 
   const submitTag = () => {
     const t = tagDraft.trim();
@@ -1834,6 +1914,9 @@ function BatchActionBar({ count, onSetStar, onAddTag, onTrash }: {
           <Pressable onPress={() => setPanel(panel === 'tag' ? null : 'tag')} hitSlop={6}>
             <Tag size={22}
               color={panel === 'tag' ? colors.brand.primary : colors.text.secondary} />
+          </Pressable>
+          <Pressable onPress={confirmAutoTag} hitSlop={6}>
+            <Sparkles size={22} color={colors.text.secondary} />
           </Pressable>
           <Pressable onPress={confirmTrash} hitSlop={6}>
             <Trash2 size={22} color={colors.status.error} />
@@ -1911,6 +1994,65 @@ function ImportProgressModal({ state, onDismiss }: {
             <Pressable onPress={onDismiss} hitSlop={6} style={{ marginTop: 16 }}>
               <Text fontSize={14} color={colors.brand.primary} fontWeight="600" textAlign="center">关闭</Text>
             </Pressable>
+          )}
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+// --- AI auto-tag progress modal ---
+
+type AutoTagStateShape =
+  | { stage: 'idle' }
+  | { stage: 'running'; index: number; total: number; name: string }
+  | { stage: 'done'; success: boolean; tagged: number; skipped: number; failed: number; total: number };
+
+function AutoTagProgressModal({ state, onCancel, onDismiss }: {
+  state: AutoTagStateShape;
+  onCancel: () => void;
+  onDismiss: () => void;
+}) {
+  if (state.stage === 'idle') return null;
+  const running = state.stage === 'running';
+
+  return (
+    <Modal visible animationType="fade" transparent onRequestClose={running ? undefined : onDismiss}>
+      <Pressable
+        style={{ flex: 1, backgroundColor: colors.overlay.scrimStrong,
+                 justifyContent: 'center', alignItems: 'center' }}
+        onPress={running ? undefined : onDismiss}
+      >
+        <Pressable onPress={e => e.stopPropagation()}
+          style={{ width: '78%', backgroundColor: colors.bg.surface, borderRadius: 14, padding: 22 }}>
+          <Text fontSize={16} fontWeight="600" color={colors.text.primary} marginBottom={12}
+            textAlign="center">{running ? 'AI 打标中' : (state.success ? '打标完成' : '打标未完成')}</Text>
+          {running ? (
+            <YStack alignItems="center" gap={10} paddingVertical={8}>
+              <Spinner size="large" color={colors.brand.primary} />
+              <Text fontSize={14} color={colors.text.secondary}>{state.index} / {state.total}</Text>
+              <Text fontSize={11} color={colors.text.tertiary} numberOfLines={1}>桌面端正在识别</Text>
+              <Pressable onPress={onCancel} hitSlop={6} style={{ marginTop: 10 }}>
+                <Text fontSize={14} color={colors.text.tertiary}>停止</Text>
+              </Pressable>
+            </YStack>
+          ) : (
+            <YStack alignItems="center" gap={8} paddingVertical={8}>
+              {state.success ? (
+                <CircleCheck size={48}
+                  color={state.failed === 0 ? colors.status.success : colors.status.warning} />
+              ) : (
+                <CircleX size={48} color={colors.status.error} />
+              )}
+              <Text fontSize={14} color={colors.text.secondary}>
+                {state.tagged === 0 && !state.success
+                  ? '未能打标,请确认桌面端在线后重试'
+                  : `已打标 ${state.tagged} 张${state.skipped > 0 ? `,跳过 ${state.skipped} 张` : ''}${state.failed > 0 ? `,失败 ${state.failed} 张` : ''}`}
+              </Text>
+              <Pressable onPress={onDismiss} hitSlop={6} style={{ marginTop: 12 }}>
+                <Text fontSize={14} color={colors.brand.primary} fontWeight="600" textAlign="center">关闭</Text>
+              </Pressable>
+            </YStack>
           )}
         </Pressable>
       </Pressable>

@@ -532,6 +532,26 @@ export class RemoteWebSocket {
   }
 
   /**
+   * Run WD14 AI auto-tag over the given library item ids on the desktop.
+   * Mirrors the desktop 资源库索引 "索引选中" path — writes tags + style + the
+   * CLIP similarity vector per item. Progress arrives as `eagle_auto_tag_progress`
+   * events ({requestId, index, total, name}); a final `eagle_auto_tag_result`
+   * ({requestId, success, tagged, skipped, failed, total}) lands at the end.
+   * Cancel an in-flight run with `cancelAutoTag()`.
+   */
+  autoTag(itemIds: string[], requestId: string = ''): boolean {
+    return this.send({
+      type: 'command', action: 'eagle_auto_tag',
+      data: { itemIds, requestId },
+    });
+  }
+
+  /** Cancel an in-flight auto-tag run (desktop stops at the next item). */
+  cancelAutoTag(): boolean {
+    return this.send({ type: 'command', action: 'eagle_auto_tag_cancel' });
+  }
+
+  /**
    * Upload a local image file to R2 relay and return the CDN URL.
    * Used for phone gallery → desktop transfer.
    */
