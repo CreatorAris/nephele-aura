@@ -83,6 +83,24 @@ export async function runDiagnostics(): Promise<DiagReport> {
     /* version info is best-effort */
   }
 
+  // 2b. Currently-running JS bundle — updateId + publish time. Lets a dev (or a
+  //     bug report) tell exactly which OTA bundle is live; a null updateId means
+  //     the embedded bundle is running (no OTA applied yet). End users never look
+  //     here — OTA itself stays silent.
+  try {
+    const uid = Updates.updateId;
+    const created = Updates.createdAt;
+    items.push({
+      key: 'bundle', label: 'JS 包',
+      detail: uid
+        ? `${uid.slice(0, 8)}… · ${created ? created.toLocaleString() : '—'}`
+        : '内置包（未 OTA）',
+      status: 'ok', hint: '',
+    });
+  } catch {
+    /* bundle info is best-effort */
+  }
+
   // 3. OTA channel — whether self-update is wired up on this build. Disabled
   //    is expected in dev (__DEV__), informational in a release build.
   try {
