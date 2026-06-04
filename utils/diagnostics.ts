@@ -72,7 +72,7 @@ export async function runDiagnostics(): Promise<DiagReport> {
   //    JS bundle / native shell the user is on.
   try {
     const ver = Constants.expoConfig?.version ?? '未知';
-    const build = __DEV__ ? '开发版' : '正式版';
+    const build = __DEV__ ? '开发版' : '测试版';
     const rtv = Updates.runtimeVersion || '—';
     items.push({
       key: 'runtime', label: '版本',
