@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import {
-  Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, TextInput,
+  Keyboard, Platform, Pressable, ScrollView, StyleSheet, TextInput,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { YStack, XStack, Text, Spinner } from 'tamagui';
@@ -322,28 +322,12 @@ const MessageRow = memo(function MessageRow({ msg, onSource, pickerThumbs, onOpe
   onAnswerQuestion: (questionId: string, answers: Record<string, string | string[]>) => void;
 }) {
   const isUser = msg.role === 'user';
-  const cleanFull = isUser ? msg.text : stripMarkers(msg.text);
+  const body = isUser ? msg.text : stripMarkers(msg.text);
 
-  // /v1/chat/max has NO token-level streaming — the Worker consumes the whole
-  // upstream generation then reconstructs it into a single SSE chunk (see
-  // reconstructSSE). So the answer lands all at once; we reveal it client-side
-  // (typewriter) for a live feel. Speed eases by remaining length so long
-  // answers still finish in well under a second.
-  const [shown, setShown] = useState(isUser ? 1e9 : 0);
-  const targetRef = useRef(0);
-  targetRef.current = cleanFull.length;
-  useEffect(() => {
-    if (isUser) return;
-    const id = setInterval(() => {
-      setShown((s) => (s >= targetRef.current ? s : Math.min(targetRef.current, s + Math.max(2, Math.ceil((targetRef.current - s) / 22)))));
-    }, 24);
-    return () => clearInterval(id);
-  }, [isUser]);
-
-  const hasFirstToken = cleanFull.length > 0 || msg.thinking.length > 0;
-  const body = isUser ? cleanFull : cleanFull.slice(0, shown);
-  const revealing = !isUser && shown < targetRef.current;
-  const showCursor = !isUser && (msg.streaming || revealing);
+  // Text renders as it actually arrives over SSE — no client typewriter. The
+  // cursor shows while the turn is in flight.
+  const hasFirstToken = body.length > 0 || msg.thinking.length > 0;
+  const showCursor = !isUser && msg.streaming;
 
   return (
     <XStack testID={isUser ? 'msg-user' : 'msg-assistant'} paddingHorizontal={16} paddingVertical={8} gap={6}>
@@ -438,6 +422,7 @@ export default function AssistantScreen() {
   const scrollRef = useRef<ScrollView>(null);
   const insets = useSafeAreaInsets();
   const [kbVisible, setKbVisible] = useState(false);
+  const [kbHeight, setKbHeight] = useState(0);
   const [inputFocused, setInputFocused] = useState(false);
 
   // Desktop presence gates MAX. If the desktop drops while MAX is on, fall the
@@ -488,13 +473,25 @@ export default function AssistantScreen() {
     return () => clearTimeout(t);
   }, [messages]);
 
-  // While the keyboard is up the floating tab bar is covered, so the composer
-  // only needs a small gap; idle, it must clear the raised FAB ball.
+  // Lift the content above the IME ourselves. Under edge-to-edge (Expo SDK 54
+  // default) the window no longer shrinks for the keyboard, so `adjustResize`
+  // and a platform-branched KeyboardAvoidingView leave the composer behind the
+  // keyboard. We track the real IME height and pad the content container by it.
+  // iOS gets the will* events (fire before the animation, so the lift stays in
+  // sync); Android only emits did*.
   useEffect(() => {
-    const show = Keyboard.addListener('keyboardDidShow', () => setKbVisible(true));
-    const hide = Keyboard.addListener('keyboardDidHide', () => setKbVisible(false));
+    const showEvt = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvt = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const show = Keyboard.addListener(showEvt, (e) => {
+      setKbVisible(true);
+      setKbHeight(e.endCoordinates?.height ?? 0);
+      requestAnimationFrame(() => scrollRef.current?.scrollToEnd({ animated: true }));
+    });
+    const hide = Keyboard.addListener(hideEvt, () => { setKbVisible(false); setKbHeight(0); });
     return () => { show.remove(); hide.remove(); };
   }, []);
+  // While the keyboard is up the content container already lifts by kbHeight, so
+  // the composer only needs a small gap; idle, it must clear the raised FAB ball.
   const composerPad = kbVisible ? 10 : insets.bottom + TAB_BAR_RAISED_CLEARANCE;
 
   const updateLast = useCallback((fn: (m: Msg) => Msg) => {
@@ -564,6 +561,29 @@ export default function AssistantScreen() {
       case 'tool_call_started':
         updateLast((m) => ({ ...m, tools: [...m.tools, { name: String(d.tool ?? '工具'), status: 'running' }], question: undefined }));
         break;
+      case 'tool_call_progress': {
+        // Live sub-step breakdown inside a long-running tool (find_references
+        // etc.) — surface the active step as the running row's summary so the
+        // spinner doesn't read as a hang.
+        const tool = String(d.tool ?? '');
+        const steps = (d.steps ?? {}) as { title?: string; steps?: { name: string; status: string }[] };
+        const list = steps.steps ?? [];
+        const active = list.find((s) => s.status === 'running') ?? list[list.length - 1];
+        const label = active?.name || steps.title || '';
+        if (label) {
+          updateLast((m) => {
+            const tools = [...m.tools];
+            for (let i = tools.length - 1; i >= 0; i--) {
+              if (tools[i].name === tool && tools[i].status === 'running') {
+                tools[i] = { ...tools[i], summary: label };
+                break;
+              }
+            }
+            return { ...m, tools };
+          });
+        }
+        break;
+      }
       case 'tool_call_finished': {
         const tool = String(d.tool ?? '');
         const success = d.success !== false;
@@ -763,7 +783,7 @@ export default function AssistantScreen() {
         )}
       </XStack>
 
-      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <YStack flex={1} paddingBottom={kbVisible ? kbHeight : 0}>
         {empty ? (
           <YStack flex={1} justifyContent="center" paddingHorizontal={20}>
             <GlassCard style={{ alignItems: 'center', gap: 14 }}>
@@ -871,7 +891,7 @@ export default function AssistantScreen() {
             </XStack>
           </YStack>
         </YStack>
-      </KeyboardAvoidingView>
+      </YStack>
 
       {/* Desktop chat-history browser (B) — tap a session to load its
           transcript into the view. Read-only history; new sends start/continue

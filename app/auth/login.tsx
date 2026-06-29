@@ -1,4 +1,4 @@
-import { StyleSheet, KeyboardAvoidingView, Platform, TextInput, Pressable } from 'react-native';
+import { StyleSheet, Keyboard, Platform, TextInput, Pressable } from 'react-native';
 import { Image } from 'expo-image';
 import { YStack, XStack, Text } from 'tamagui';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -61,7 +61,20 @@ export default function LoginScreen() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [countdown, setCountdown] = useState(0);
+  const [kbHeight, setKbHeight] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Edge-to-edge (Expo SDK 54) stops the window from resizing for the IME, so a
+  // platform-branched KeyboardAvoidingView leaves the centered form behind the
+  // keyboard on Android. Pad the container by the real IME height instead —
+  // justifyContent:center re-centers the form into the remaining space.
+  useEffect(() => {
+    const showEvt = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvt = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const show = Keyboard.addListener(showEvt, (e) => setKbHeight(e.endCoordinates?.height ?? 0));
+    const hide = Keyboard.addListener(hideEvt, () => setKbHeight(0));
+    return () => { show.remove(); hide.remove(); };
+  }, []);
 
   useEffect(() => {
     if (countdown > 0) {
@@ -108,8 +121,7 @@ export default function LoginScreen() {
 
   return (
     <SafeAreaView style={styles.container}>
-      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <YStack flex={1} justifyContent="center" paddingHorizontal="$5" gap="$5">
+        <YStack flex={1} justifyContent="center" paddingHorizontal="$5" gap="$5" paddingBottom={kbHeight}>
           {/* Login card — brand + form contained in one padded card. tmui's
               login wraps the whole form in an x-sheet (centered, big padding),
               not full-bleed bars stacked down the page. */}
@@ -166,13 +178,11 @@ export default function LoginScreen() {
             </YStack>
           )}
         </YStack>
-      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.bg.canvas },
-  flex: { flex: 1 },
   logo: { width: 60, height: 60, borderRadius: 16 },
 });
