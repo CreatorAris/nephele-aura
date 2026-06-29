@@ -8,7 +8,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useFocusEffect } from 'expo-router';
 import { Image } from 'expo-image';
 import Markdown from 'react-native-markdown-display';
-import { ArrowUp, Square, Sparkles, ChevronDown, ChevronUp, ChevronRight, Zap, Monitor, Wrench, Check, X as XIcon, ImageOff, History, Plus } from 'lucide-react-native';
+import { ArrowUp, Square, Sparkles, ChevronDown, ChevronUp, ChevronRight, Zap, Wrench, Check, X as XIcon, ImageOff, History, Plus } from 'lucide-react-native';
 import { colors } from '../../theme/colors';
 import { GlassCard } from '../../components/GlassCard';
 import { TAB_BAR_RAISED_CLEARANCE } from '../../components/FloatingTabBar';
@@ -872,18 +872,16 @@ export default function AssistantScreen() {
               style={{ color: colors.text.primary, fontSize: 15, minHeight: 24, maxHeight: 120, paddingHorizontal: 14, paddingTop: 12, paddingBottom: 2 }}
             />
 
-            {/* Bottom toolbar — model-tier segmented control + send. MAX (desktop
-                relay) sits on its own row below, only when the desktop is online. */}
+            {/* Bottom toolbar — model-tier segmented control + send. */}
             <XStack paddingHorizontal={10} paddingBottom={8} paddingTop={4} alignItems="center" gap={8}>
-              {/* Zephyr | Tempest tier picker. Dimmed while MAX relay is on — the
-                  desktop runs its own model then, so the cloud tier doesn't apply. */}
+              {/* Zephyr (fast/cheap) | Tempest (full power) — cloud tier picker. */}
               <XStack borderRadius={9} borderWidth={1} borderColor={colors.border.default}
-                overflow="hidden" opacity={maxMode ? 0.4 : 1}>
+                overflow="hidden">
                 {(['zephyr', 'tempest'] as const).map((t) => {
                   const on = tier === t;
                   return (
                     <Pressable key={t} testID={`tier-${t}`} accessibilityState={{ selected: on }}
-                      onPress={() => setTier(t)} hitSlop={4} disabled={maxMode}>
+                      onPress={() => setTier(t)} hitSlop={4}>
                       <XStack height={26} paddingHorizontal={11} alignItems="center" gap={4}
                         backgroundColor={on ? 'rgba(206,172,224,0.16)' : 'transparent'}>
                         <Zap size={11} color={on ? colors.brand.primary : colors.text.tertiary}
@@ -911,30 +909,6 @@ export default function AssistantScreen() {
               </Pressable>
             </XStack>
           </YStack>
-
-          {/* MAX (desktop relay) — only when the desktop is paired. Drives the
-              desktop's full Cloud MAX agent over the relay (local library / files
-              / tools); overrides the cloud tier above while on. */}
-          {desktopOnline && (
-            <Pressable testID="max-toggle" accessibilityState={{ selected: maxMode }}
-              onPress={() => setMaxMode((v) => !v)} hitSlop={6}>
-              <XStack marginTop={8} alignSelf="flex-start" borderRadius={9} paddingHorizontal={10} height={28}
-                alignItems="center" gap={5} borderWidth={1}
-                backgroundColor={maxMode ? 'rgba(245,200,120,0.14)' : 'transparent'}
-                borderColor={maxMode ? colors.status.warning : colors.border.default}>
-                <Zap size={12} color={maxMode ? colors.status.warning : colors.text.tertiary}
-                  fill={maxMode ? colors.status.warning : 'transparent'} />
-                <Text fontSize={12} fontWeight={maxMode ? '700' : '500'} letterSpacing={0.3}
-                  color={maxMode ? colors.status.warning : colors.text.tertiary}>MAX 联桌面</Text>
-                {maxMode && (
-                  <XStack alignItems="center" gap={4} marginLeft={2}>
-                    <Monitor size={11} color={colors.text.faint} />
-                    <Text fontSize={11} color={colors.text.faint}>本地库 · 文件 · 工具</Text>
-                  </XStack>
-                )}
-              </XStack>
-            </Pressable>
-          )}
         </YStack>
       </YStack>
 
