@@ -13,11 +13,15 @@ import {
 import { OTA_TRIGGER_EVENT } from '../utils/push';
 import analytics from '../utils/analytics';
 
-// Invisible gate mounted at the app root. On launch it:
-//   1. fetches an OTA bundle in the background (applies next cold start), then
-//   2. checks for a newer APK and, if one exists, prompts the user.
-// Mandatory updates suppress the cancel/scrim path so the app can't be used
-// on a build that's been hard-cut.
+// Invisible gate mounted at the app root.
+//   OTA (L1, JS bundle):
+//     - launch + every foreground: silently fetch & stage → applies on the next
+//       cold start. NO prompt — users update seamlessly (纯无感).
+//     - dev push-trigger (only AURA_DEV_UID gets the push): surfaces an instant
+//       "立即重载" prompt, kept solely for fast dev iteration.
+//   APK (L2, native): checked after the OTA stage; prompts if a newer build
+//     exists. Mandatory updates suppress the cancel/scrim path so the app can't
+//     be used on a build that's been hard-cut.
 type Phase = 'idle' | 'prompt' | 'downloading';
 
 export function UpdateGate() {
@@ -38,15 +42,25 @@ export function UpdateGate() {
     // app returns to the foreground, so a freshly published update is picked up
     // mid-session — the old flow only checked on launch and applied on the NEXT
     // cold start. No-ops in dev / before EAS Update is configured.
-    const runOta = async () => {
-      if (otaReadyRef.current || checkingRef.current) return;
+    // viaPush = the dev OTA-trigger message (only AURA_DEV_UID receives it).
+    // Only that path surfaces the instant-reload prompt; launch/foreground
+    // checks (which every user runs) stage the bundle silently → next cold
+    // start applies it with no popup.
+    const runOta = async (viaPush: boolean) => {
+      // Already staged: a dev push still surfaces the reload prompt; a
+      // launch/foreground re-check does nothing.
+      if (otaReadyRef.current) {
+        if (viaPush) setOtaReady(true);
+        return;
+      }
+      if (checkingRef.current) return;
       checkingRef.current = true;
       try {
         const fetched = await checkOtaUpdate();
         if (!cancelled && fetched) {
-          otaReadyRef.current = true;
-          setOtaReady(true);
-          analytics.capture('aura_ota_ready');
+          otaReadyRef.current = true;   // staged → applies on next cold start regardless
+          analytics.capture('aura_ota_ready', { viaPush });
+          if (viaPush) setOtaReady(true);
         }
       } finally {
         checkingRef.current = false;
@@ -54,7 +68,7 @@ export function UpdateGate() {
     };
 
     (async () => {
-      await runOta();                       // launch check
+      await runOta(false);                  // launch check — silent stage
       const apk = await checkApkUpdate();   // L2 (native) — separate prompt
       if (cancelled || !apk) return;
       setRelease(apk.release);
@@ -69,12 +83,12 @@ export function UpdateGate() {
     // Re-check when the app comes back to the foreground (switch desktop→phone
     // after publishing an OTA → it's picked up without a restart).
     const sub = AppState.addEventListener('change', (s) => {
-      if (s === 'active') void runOta();
+      if (s === 'active') void runOta(false);   // foreground — silent stage
     });
     // Push-driven: a silent OTA-trigger message (server fires it after publish)
     // pulls the bundle immediately while the app is open — no polling, no
     // foreground bounce. Falls back to the launch/foreground checks above.
-    const otaSub = DeviceEventEmitter.addListener(OTA_TRIGGER_EVENT, () => void runOta());
+    const otaSub = DeviceEventEmitter.addListener(OTA_TRIGGER_EVENT, () => void runOta(true));
     return () => {
       cancelled = true;
       sub.remove();
@@ -103,9 +117,10 @@ export function UpdateGate() {
     }
   };
 
-  // L1 (OTA / JS) bundle ready → offer an instant reload (no cold start).
-  // Shown only when no native-update dialog is up (APK prompt takes priority);
-  // dismissable, and it still applies on the next cold start regardless.
+  // L1 (OTA / JS) reload prompt — only reached via the dev push-trigger
+  // (otaReady is set only when viaPush). Offers an instant reload (no cold
+  // start). Shown only when no native-update dialog is up (APK prompt takes
+  // priority); dismissable, and it still applies on the next cold start anyway.
   if (otaReady && !(release && phase !== 'idle')) {
     return (
       <AuraDialog
