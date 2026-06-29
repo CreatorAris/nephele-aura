@@ -26,9 +26,26 @@ export interface AgentCallbacks {
   onThinking: (delta: string) => void;
   onSources: (sources: Source[]) => void;        // de-duped new sources only
   onStamina: (cost: number, totalRemaining: number | null) => void;
+  onTool?: (name: string, status: 'running' | 'done', arg?: string) => void;  // server-side tool loop
   onDone: () => void;
   onError: (message: string) => void;
 }
+
+// Cloud tools the Worker executes server-side (the X-Server-Tools loop). Declared
+// so the model can emit the call; the Worker intercepts cloud_search / web_fetch
+// by name and runs them, streaming back live tool + source events.
+const CLOUD_TOOLS = [
+  {
+    name: 'cloud_search',
+    description: '联网搜索实时信息、资料或参考。需要最新或外部信息时调用。',
+    parameters: { type: 'object', properties: { query: { type: 'string', description: '搜索关键词' } }, required: ['query'] },
+  },
+  {
+    name: 'web_fetch',
+    description: '抓取并阅读一个网页 URL 的内容。',
+    parameters: { type: 'object', properties: { url: { type: 'string', description: '网页地址' } }, required: ['url'] },
+  },
+];
 
 // Server appends these HTML-comment markers to streamed text (sources/images/
 // undo/progress); the desktop strips them for display. We do the same on render
@@ -43,13 +60,17 @@ export function stripMarkers(text: string): string {
 }
 
 /**
- * Stream one assistant turn from /v1/chat/max. `history` is the full
- * conversation (user/assistant turns); the latest user message is last.
- * Callbacks fire incrementally; resolves when the stream ends.
+ * Stream one assistant turn from /v1/chat/max on the chosen model tier
+ * (`zephyr` = Axioma Zephyr / DeepSeek flash, fast+cheap; `tempest` = Axioma
+ * Tempest / DeepSeek pro, full power + thinking). Runs the SERVER-SIDE tool loop
+ * (X-Server-Tools): cloud_search / web_fetch execute on the Worker and stream
+ * back as live thinking + tool + source events, so the phone gets the desktop's
+ * agent UX without a client-side tool loop. `history` is the full conversation
+ * (latest user message last). Callbacks fire incrementally; resolves when done.
  */
 export async function streamAssistant(
   history: ChatTurn[],
-  max: boolean,
+  tier: 'zephyr' | 'tempest',
   signal: AbortSignal,
   cb: AgentCallbacks,
 ): Promise<void> {
@@ -58,16 +79,16 @@ export async function streamAssistant(
 
   const messages = history.map((t) => ({ role: t.role, content: t.content }));
 
-  // MAX → /v1/chat/max: server_orchestrate (skills) + server-side tool loop;
-  //   no token streaming (consume→reconstruct), client typewriter smooths it.
-  // Default → /v1/chat/completions: TRUE pass-through token streaming + grounding,
-  //   billed cheaper ("chat"). Same Gemini SSE shape, so the parser below is shared.
-  const endpoint = max ? '/v1/chat/max' : '/v1/chat/completions';
-  const body = JSON.stringify(
-    max
-      ? { messages, server_orchestrate: true, use_grounding: true, max_output_tokens: 8192, thinking_budget: 2048 }
-      : { messages, use_grounding: true },
-  );
+  const endpoint = '/v1/chat/max';
+  const body = JSON.stringify({
+    messages,
+    model_tier: tier,
+    server_orchestrate: true,   // Worker assembles the prompt + skills (no system_prompt)
+    use_grounding: true,
+    max_output_tokens: 8192,
+    thinking_budget: 2048,
+    tools: CLOUD_TOOLS,
+  });
 
   const doFetch = (tok: string) =>
     expoFetch(`${API_BASE}${endpoint}`, {
@@ -77,6 +98,8 @@ export async function streamAssistant(
         Authorization: `Bearer ${tok}`,
         'X-Client-Type': CLIENT_TYPE,
         'X-App-Version': APP_VERSION,
+        'X-Stream': '1',          // stream tokens as they arrive
+        'X-Server-Tools': '1',    // run cloud_search / web_fetch on the server
       },
       body,
       signal,
@@ -124,6 +147,29 @@ export async function streamAssistant(
         if (!payload || payload === '[DONE]') continue;
         let json: any;
         try { json = JSON.parse(payload); } catch { continue; }
+
+        // Server-side tool-loop events (X-Server-Tools), alongside the Gemini-
+        // shape candidates: live tool cards, grounding sources, final billing.
+        if (json.nephele_tool) {
+          cb.onTool?.(String(json.nephele_tool.name || ''),
+            json.nephele_tool.status === 'done' ? 'done' : 'running',
+            json.nephele_tool.arg);
+          continue;
+        }
+        if (json.nephele_sources) {
+          const picked: Source[] = [];
+          for (const s of (json.nephele_sources as Source[]) ?? []) {
+            if (s?.uri && !seen[s.uri]) { seen[s.uri] = true; picked.push({ uri: s.uri, title: s.title || s.uri }); }
+          }
+          if (picked.length) cb.onSources(picked);
+          continue;
+        }
+        if (json.nephele_billing) {
+          const b = json.nephele_billing;
+          const remain = b.total_remaining ?? b.stamina_remaining;
+          cb.onStamina(Number(b.stamina_cost) || 0, remain != null ? Number(remain) : null);
+          continue;
+        }
 
         const cand = json.candidates?.[0];
         for (const p of cand?.content?.parts ?? []) {

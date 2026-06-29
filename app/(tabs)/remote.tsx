@@ -404,6 +404,9 @@ export default function AssistantScreen() {
   // only available while the desktop is online. Plain chat stays cloud-direct
   // (/v1/chat/max) and works anywhere.
   const [maxMode, setMaxMode] = useState(false);
+  // Cloud model tier for standalone chat (no desktop): Zephyr = fast/cheap,
+  // Tempest = full power + thinking. Maps to /v1/chat/max model_tier.
+  const [tier, setTier] = useState<'zephyr' | 'tempest'>('zephyr');
   const [desktopOnline, setDesktopOnline] = useState(() => remoteWS.getDesktopOnline());
   const abortRef = useRef<AbortController | null>(null);
   // True while a desktop-agent turn is in flight, so the relay event handler
@@ -722,12 +725,12 @@ export default function AssistantScreen() {
       return;
     }
 
-    const mode = 'chat';
+    const mode = tier;
     analytics.capture('assistant_message', { turn: history.length, mode });
 
     const ctrl = new AbortController();
     abortRef.current = ctrl;
-    void streamAssistant(history, false, ctrl.signal, {
+    void streamAssistant(history, tier, ctrl.signal, {
       onText: (d) => updateLast((m) => ({ ...m, text: m.text + d })),
       onThinking: (d) => updateLast((m) => ({ ...m, thinking: m.thinking + d })),
       onSources: (s) => updateLast((m) => ({ ...m, sources: [...m.sources, ...s] })),
@@ -735,17 +738,34 @@ export default function AssistantScreen() {
         if (cost > 0) updateLast((m) => ({ ...m, stamina: cost }));
         if (remaining != null) setCredits(remaining);
       },
+      // Server-side tool loop: render a live tool row (running → done), same as
+      // the desktop-relay path's tool_call_started/finished.
+      onTool: (name, status) => updateLast((m) => {
+        if (status === 'running') return { ...m, tools: [...m.tools, { name, status: 'running' as const }] };
+        const tools = [...m.tools];
+        for (let i = tools.length - 1; i >= 0; i--) {
+          if (tools[i].name === name && tools[i].status === 'running') { tools[i] = { ...tools[i], status: 'ok' }; break; }
+        }
+        return { ...m, tools };
+      }),
       onDone: () => {
-        updateLast((m) => ({ ...m, streaming: false })); setStreaming(false); abortRef.current = null;
+        // Flush any tool row still 'running' (e.g. a server-side tool that errored
+        // never sent its 'done' event) so the spinner doesn't spin forever.
+        updateLast((m) => ({
+          ...m,
+          streaming: false,
+          tools: m.tools.map((t) => (t.status === 'running' ? { ...t, status: 'fail' as const } : t)),
+        }));
+        setStreaming(false); abortRef.current = null;
         analytics.capture('assistant_response', { mode, latency_ms: Date.now() - t0 });
       },
       onError: (msg) => {
-        updateLast((m) => ({ ...m, streaming: false, text: m.text || `⚠ ${msg}` }));
+        updateLast((m) => ({ ...m, streaming: false, text: m.text || `⚠ ${msg}`, tools: m.tools.map((t) => (t.status === 'running' ? { ...t, status: 'fail' as const } : t)) }));
         setStreaming(false); abortRef.current = null;
         analytics.capture('assistant_error', { mode, latency_ms: Date.now() - t0, message: String(msg).slice(0, 80) });
       },
     });
-  }, [input, streaming, messages, maxMode, desktopOnline, updateLast]);
+  }, [input, streaming, messages, maxMode, tier, desktopOnline, updateLast]);
 
   const stop = useCallback(() => {
     if (awaitingDesktopRef.current) {
@@ -852,30 +872,31 @@ export default function AssistantScreen() {
               style={{ color: colors.text.primary, fontSize: 15, minHeight: 24, maxHeight: 120, paddingHorizontal: 14, paddingTop: 12, paddingBottom: 2 }}
             />
 
-            {/* Bottom toolbar — MAX mode toggle (gold when on, mirrors desktop) + send */}
+            {/* Bottom toolbar — model-tier segmented control + send. MAX (desktop
+                relay) sits on its own row below, only when the desktop is online. */}
             <XStack paddingHorizontal={10} paddingBottom={8} paddingTop={4} alignItems="center" gap={8}>
-              {/* MAX runs the desktop's full-power agent over the relay — only
-                  available when the desktop is online (greyed + locked otherwise). */}
-              <Pressable testID="max-toggle" accessibilityState={{ selected: maxMode, disabled: !desktopOnline }}
-                onPress={() => desktopOnline && setMaxMode((v) => !v)} hitSlop={6} disabled={!desktopOnline}>
-                <XStack borderRadius={9} paddingHorizontal={9} height={26} alignItems="center" gap={4}
-                  opacity={desktopOnline ? 1 : 0.45}
-                  backgroundColor={maxMode ? 'rgba(245,200,120,0.14)' : 'transparent'}
-                  borderWidth={1} borderColor={maxMode ? colors.status.warning : colors.border.default}>
-                  <Zap size={12} color={maxMode ? colors.status.warning : colors.text.tertiary}
-                    fill={maxMode ? colors.status.warning : 'transparent'} />
-                  <Text fontSize={12} fontWeight={maxMode ? '700' : '500'} letterSpacing={0.3}
-                    color={maxMode ? colors.status.warning : colors.text.tertiary}>MAX</Text>
-                </XStack>
-              </Pressable>
-              {maxMode ? (
-                <XStack alignItems="center" gap={4}>
-                  <Monitor size={11} color={colors.text.faint} />
-                  <Text fontSize={11} color={colors.text.faint}>本地库 · 文件 · 工具</Text>
-                </XStack>
-              ) : !desktopOnline ? (
-                <Text fontSize={11} color={colors.text.faint}>MAX 需桌面在线</Text>
-              ) : null}
+              {/* Zephyr | Tempest tier picker. Dimmed while MAX relay is on — the
+                  desktop runs its own model then, so the cloud tier doesn't apply. */}
+              <XStack borderRadius={9} borderWidth={1} borderColor={colors.border.default}
+                overflow="hidden" opacity={maxMode ? 0.4 : 1}>
+                {(['zephyr', 'tempest'] as const).map((t) => {
+                  const on = tier === t;
+                  return (
+                    <Pressable key={t} testID={`tier-${t}`} accessibilityState={{ selected: on }}
+                      onPress={() => setTier(t)} hitSlop={4} disabled={maxMode}>
+                      <XStack height={26} paddingHorizontal={11} alignItems="center" gap={4}
+                        backgroundColor={on ? 'rgba(206,172,224,0.16)' : 'transparent'}>
+                        <Zap size={11} color={on ? colors.brand.primary : colors.text.tertiary}
+                          fill={on ? colors.brand.primary : 'transparent'} />
+                        <Text fontSize={12} fontWeight={on ? '700' : '500'} letterSpacing={0.3}
+                          color={on ? colors.brand.primary : colors.text.tertiary}>
+                          {t === 'zephyr' ? 'Zephyr' : 'Tempest'}
+                        </Text>
+                      </XStack>
+                    </Pressable>
+                  );
+                })}
+              </XStack>
               <YStack flex={1} />
               <Pressable testID="composer-send" accessibilityLabel={streaming ? 'stop' : 'send'}
                 onPress={() => (streaming ? stop() : send())} disabled={!streaming && !input.trim()}>
@@ -890,6 +911,30 @@ export default function AssistantScreen() {
               </Pressable>
             </XStack>
           </YStack>
+
+          {/* MAX (desktop relay) — only when the desktop is paired. Drives the
+              desktop's full Cloud MAX agent over the relay (local library / files
+              / tools); overrides the cloud tier above while on. */}
+          {desktopOnline && (
+            <Pressable testID="max-toggle" accessibilityState={{ selected: maxMode }}
+              onPress={() => setMaxMode((v) => !v)} hitSlop={6}>
+              <XStack marginTop={8} alignSelf="flex-start" borderRadius={9} paddingHorizontal={10} height={28}
+                alignItems="center" gap={5} borderWidth={1}
+                backgroundColor={maxMode ? 'rgba(245,200,120,0.14)' : 'transparent'}
+                borderColor={maxMode ? colors.status.warning : colors.border.default}>
+                <Zap size={12} color={maxMode ? colors.status.warning : colors.text.tertiary}
+                  fill={maxMode ? colors.status.warning : 'transparent'} />
+                <Text fontSize={12} fontWeight={maxMode ? '700' : '500'} letterSpacing={0.3}
+                  color={maxMode ? colors.status.warning : colors.text.tertiary}>MAX 联桌面</Text>
+                {maxMode && (
+                  <XStack alignItems="center" gap={4} marginLeft={2}>
+                    <Monitor size={11} color={colors.text.faint} />
+                    <Text fontSize={11} color={colors.text.faint}>本地库 · 文件 · 工具</Text>
+                  </XStack>
+                )}
+              </XStack>
+            </Pressable>
+          )}
         </YStack>
       </YStack>
 
