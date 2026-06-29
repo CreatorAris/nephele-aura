@@ -398,16 +398,14 @@ export default function AssistantScreen() {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
-  // Cloud model tier for standalone chat: Zephyr = fast/cheap, Tempest = full
-  // power + thinking (maps to /v1/chat/max model_tier). This is the cheap
-  // default and is HONORED end-to-end (the desktop relay path below is not).
+  // Model tier: Zephyr = fast/cheap, Tempest = full power (maps to model_tier).
+  // HONORED end-to-end on BOTH paths now — the cloud /v1/chat/max path and the
+  // desktop relay (the desktop runs cloud_max_zephyr / cloud_max for the picked
+  // tier instead of the old force-Tempest).
   const [tier, setTier] = useState<'zephyr' | 'tempest'>('zephyr');
-  // Explicit opt-in to route this chat to the desktop's full Cloud MAX agent
-  // (local library / files / references). The relay IGNORES the tier above and
-  // forces the desktop's full (Tempest) tier — heavy + pricey — so it's OFF by
-  // default. The 桌面 chip is always shown; if it's picked while the desktop is
-  // offline, send hints instead of silently falling back to a cloud tier.
-  const [desktopMode, setDesktopMode] = useState(false);
+  // Desktop presence drives routing: online → auto-route the turn to the
+  // desktop's full Cloud MAX agent (local library / files / run_python /
+  // reference picker) running the picked tier; offline → cloud tier only.
   const [desktopOnline, setDesktopOnline] = useState(() => remoteWS.getDesktopOnline());
   const abortRef = useRef<AbortController | null>(null);
   // True while a desktop-agent turn is in flight, so the relay event handler
@@ -429,15 +427,12 @@ export default function AssistantScreen() {
   const [kbHeight, setKbHeight] = useState(0);
   const [inputFocused, setInputFocused] = useState(false);
 
-  // Desktop presence only drives the header status + whether the 桌面 chip is
-  // usable; it no longer flips the user's selection. A drop mid-turn must still
-  // finalize the in-flight message.
+  // Desktop presence drives routing (online → auto-route to the desktop agent)
+  // and the header status pill. A drop mid-turn must finalize the in-flight
+  // message so it doesn't stream forever.
   useEffect(() => remoteWS.onDesktopStateChange((online) => {
     setDesktopOnline(online);
     if (!online) {
-      // Keep the user's 桌面 selection (header pill shows 离线; send hints).
-      // A desktop drop mid-turn would otherwise leave the message streaming
-      // forever — finalize it with an error instead.
       if (awaitingDesktopRef.current) {
         awaitingDesktopRef.current = false;
         setStreaming(false);
@@ -697,14 +692,6 @@ export default function AssistantScreen() {
     const text = (preset ?? input).trim();
     if (!text || streaming) return;
 
-    // 桌面 chip selected but the desktop is offline → honest hint, never
-    // silently fall back to a cloud tier (that's the "shows X, ran Y" surprise
-    // we removed). The header pill already shows 离线; ask them to bring it up.
-    if (desktopMode && !desktopOnline) {
-      showToast('桌面未连接，请先在电脑上打开 Nephele');
-      return;
-    }
-
     const priorTurns: ChatTurn[] = messages.map((m) => ({ role: m.role, content: m.text }));
     const history: ChatTurn[] = [...priorTurns, { role: 'user' as const, content: text }];
     setMessages((prev) => [
@@ -716,15 +703,14 @@ export default function AssistantScreen() {
     setStreaming(true);
     const t0 = Date.now();
 
-    // Desktop opt-in (the "桌面" chip) → route to its full Cloud MAX agent over
-    // the relay (local library / files / references / run_python); events come
-    // back via the onMessage subscription. Default → cloud tier (Zephyr/Tempest).
-    const useDesktop = desktopMode && desktopOnline;
-    if (useDesktop) {
-      analytics.capture('assistant_message', { turn: history.length, mode: 'max_desktop' });
+    // Desktop online → auto-route to its full Cloud MAX agent over the relay
+    // (local library / files / references / run_python), running the picked
+    // tier; events come back via the onMessage subscription. Offline → cloud.
+    if (desktopOnline) {
+      analytics.capture('assistant_message', { turn: history.length, mode: `desktop_${tier}` });
       awaitingDesktopRef.current = true;
       desktopT0Ref.current = t0;
-      const ok = remoteWS.sendAgent(text, { deepThink: false, history: priorTurns });
+      const ok = remoteWS.sendAgent(text, { deepThink: false, history: priorTurns, modelTier: tier });
       if (!ok) {
         awaitingDesktopRef.current = false;
         updateLast((m) => ({ ...m, streaming: false, text: '⚠ 桌面连接已断开，请重试' }));
@@ -772,7 +758,7 @@ export default function AssistantScreen() {
         analytics.capture('assistant_error', { mode, latency_ms: Date.now() - t0, message: String(msg).slice(0, 80) });
       },
     });
-  }, [input, streaming, messages, tier, desktopMode, desktopOnline, updateLast, showToast]);
+  }, [input, streaming, messages, tier, desktopOnline, updateLast]);
 
   const stop = useCallback(() => {
     if (awaitingDesktopRef.current) {
@@ -886,16 +872,16 @@ export default function AssistantScreen() {
 
             {/* Bottom toolbar — model-tier segmented control + send. */}
             <XStack paddingHorizontal={10} paddingBottom={8} paddingTop={4} alignItems="center" gap={8}>
-              {/* Engine picker: cheap cloud tiers (honored end-to-end) by default;
-                  the desktop's full agent is an explicit, heavier opt-in shown
-                  only when the desktop is online — selecting it forces the
-                  desktop's full (Tempest) tier over the relay. */}
+              {/* Engine picker: Zephyr (cheap) / Tempest (full power). Honored
+                  end-to-end on both routes — cloud when the desktop is offline,
+                  the desktop's full agent on that same tier when it's online
+                  (auto-routed; presence shown by the header pill). */}
               <XStack borderRadius={9} borderWidth={1} borderColor={colors.border.default} overflow="hidden">
                 {(['zephyr', 'tempest'] as const).map((t) => {
-                  const on = !desktopMode && tier === t;
+                  const on = tier === t;
                   return (
                     <Pressable key={t} testID={`tier-${t}`} accessibilityState={{ selected: on }}
-                      onPress={() => { setTier(t); setDesktopMode(false); }} hitSlop={4}>
+                      onPress={() => setTier(t)} hitSlop={4}>
                       <XStack height={26} paddingHorizontal={11} alignItems="center" gap={4}
                         backgroundColor={on ? 'rgba(206,172,224,0.16)' : 'transparent'}>
                         <Zap size={11} color={on ? colors.brand.primary : colors.text.tertiary}
@@ -908,18 +894,6 @@ export default function AssistantScreen() {
                     </Pressable>
                   );
                 })}
-                {/* 桌面 is always offered (stable selector); when the desktop is
-                    offline it's dimmed and send hints rather than vanishing. */}
-                <Pressable testID="tier-desktop" accessibilityState={{ selected: desktopMode }}
-                  onPress={() => setDesktopMode(true)} hitSlop={4}
-                  style={{ opacity: desktopOnline ? 1 : 0.5 }}>
-                  <XStack height={26} paddingHorizontal={11} alignItems="center" gap={4}
-                    backgroundColor={desktopMode ? 'rgba(245,200,120,0.16)' : 'transparent'}>
-                    <Monitor size={11} color={desktopMode ? colors.status.warning : colors.text.tertiary} />
-                    <Text fontSize={12} fontWeight={desktopMode ? '700' : '500'} letterSpacing={0.3}
-                      color={desktopMode ? colors.status.warning : colors.text.tertiary}>桌面</Text>
-                  </XStack>
-                </Pressable>
               </XStack>
               <YStack flex={1} />
               <Pressable testID="composer-send" accessibilityLabel={streaming ? 'stop' : 'send'}

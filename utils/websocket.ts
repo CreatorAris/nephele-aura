@@ -307,7 +307,7 @@ export class RemoteWebSocket {
    */
   sendAgent(
     text: string,
-    opts?: { deepThink?: boolean; history?: { role: string; content: string }[]; imageUrl?: string },
+    opts?: { deepThink?: boolean; history?: { role: string; content: string }[]; imageUrl?: string; modelTier?: 'zephyr' | 'tempest' },
   ): boolean {
     return this.send({
       type: 'command', action: 'agent_send',
@@ -315,6 +315,9 @@ export class RemoteWebSocket {
         text,
         agentMode: 'cloud_max',
         deepThink: opts?.deepThink ?? false,
+        // The desktop honors this tier (Zephyr/Tempest) instead of force-Tempest;
+        // omitting it (older builds) falls back to the desktop's own tier.
+        modelTier: opts?.modelTier ?? 'tempest',
         history: opts?.history ?? [],
         ...(opts?.imageUrl ? { imageSource: 'upload', imageUrl: opts.imageUrl } : {}),
       },
