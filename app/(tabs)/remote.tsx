@@ -618,13 +618,25 @@ export default function AssistantScreen() {
       }
       case 'agent_result':
         awaitingDesktopRef.current = false;
-        updateLast((m) => ({ ...m, text: m.text || String(d.message ?? ''), streaming: false }));
+        updateLast((m) => ({
+          ...m,
+          text: m.text || String(d.message ?? ''),
+          streaming: false,
+          // Finalize any tool whose finished event never arrived (or was
+          // dropped on the relay) so the row doesn't spin forever post-turn.
+          tools: m.tools.map((t) => (t.status === 'running' ? { ...t, status: 'ok' as const } : t)),
+        }));
         setStreaming(false);
         analytics.capture('assistant_response', { mode: 'max_desktop', latency_ms: Date.now() - desktopT0Ref.current });
         break;
       case 'agent_error':
         awaitingDesktopRef.current = false;
-        updateLast((m) => ({ ...m, streaming: false, text: m.text || `⚠ ${String(d.error ?? '桌面 agent 出错')}` }));
+        updateLast((m) => ({
+          ...m,
+          streaming: false,
+          text: m.text || `⚠ ${String(d.error ?? '桌面 agent 出错')}`,
+          tools: m.tools.map((t) => (t.status === 'running' ? { ...t, status: 'fail' as const } : t)),
+        }));
         setStreaming(false);
         analytics.capture('assistant_error', { mode: 'max_desktop', latency_ms: Date.now() - desktopT0Ref.current, message: String(d.error ?? '').slice(0, 80) });
         break;
