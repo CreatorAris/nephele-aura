@@ -88,7 +88,10 @@ export function UpdateGate() {
     // Push-driven: a silent OTA-trigger message (server fires it after publish)
     // pulls the bundle immediately while the app is open — no polling, no
     // foreground bounce. Falls back to the launch/foreground checks above.
-    const otaSub = DeviceEventEmitter.addListener(OTA_TRIGGER_EVENT, () => void runOta(true));
+    const otaSub = DeviceEventEmitter.addListener(
+      OTA_TRIGGER_EVENT,
+      (p?: { prompt?: boolean }) => void runOta(p?.prompt !== false),
+    );
     return () => {
       cancelled = true;
       sub.remove();
