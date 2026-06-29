@@ -150,12 +150,9 @@ export async function initPush(opts?: { requestPermission?: boolean }): Promise<
       JPush.addCustomMessageListener((msg: any) => {
         let extras = msg?.extras;
         if (typeof extras === 'string') { try { extras = JSON.parse(extras); } catch { extras = {}; } }
-        if (extras?.type === 'ota') {
-          // Default to the dev reload prompt; a broadcast (real release) sends
-          // prompt:false so users update silently (apply on next cold start).
-          const wantPrompt = extras.prompt !== false && extras.prompt !== 'false';
-          DeviceEventEmitter.emit(OTA_TRIGGER_EVENT, { prompt: wantPrompt });
-        }
+        // Every device gets the OTA-trigger (silent download); UpdateGate shows
+        // the reload prompt only on the dev device.
+        if (extras?.type === 'ota') DeviceEventEmitter.emit(OTA_TRIGGER_EVENT);
       });
       otaListenerAdded = true;
     }
