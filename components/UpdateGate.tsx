@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react';
-import { View } from 'react-native';
+import { useEffect, useRef, useState } from 'react';
+import { AppState, View } from 'react-native';
 import { YStack, XStack, Text } from 'tamagui';
 import { AuraDialog } from './AuraDialog';
 import { colors } from '../theme/colors';
 import {
   checkOtaUpdate,
+  applyOtaUpdate,
   checkApkUpdate,
   downloadAndInstallApk,
   type AuraRelease,
@@ -24,13 +25,36 @@ export function UpdateGate() {
   const [mandatory, setMandatory] = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  // An OTA JS bundle has been fetched and is ready to apply via reloadAsync.
+  const [otaReady, setOtaReady] = useState(false);
+  const otaReadyRef = useRef(false);   // one is already staged — don't re-prompt/re-fetch
+  const checkingRef = useRef(false);   // a check is in flight (de-dupe rapid foregrounds)
 
   useEffect(() => {
     let cancelled = false;
+
+    // Check for an OTA bundle and stage it. Runs on launch AND every time the
+    // app returns to the foreground, so a freshly published update is picked up
+    // mid-session — the old flow only checked on launch and applied on the NEXT
+    // cold start. No-ops in dev / before EAS Update is configured.
+    const runOta = async () => {
+      if (otaReadyRef.current || checkingRef.current) return;
+      checkingRef.current = true;
+      try {
+        const fetched = await checkOtaUpdate();
+        if (!cancelled && fetched) {
+          otaReadyRef.current = true;
+          setOtaReady(true);
+          analytics.capture('aura_ota_ready');
+        }
+      } finally {
+        checkingRef.current = false;
+      }
+    };
+
     (async () => {
-      // L1 first — silent, never blocks. L2 prompt comes after.
-      await checkOtaUpdate();
-      const apk = await checkApkUpdate();
+      await runOta();                       // launch check
+      const apk = await checkApkUpdate();   // L2 (native) — separate prompt
       if (cancelled || !apk) return;
       setRelease(apk.release);
       setMandatory(apk.mandatory);
@@ -40,8 +64,15 @@ export function UpdateGate() {
         mandatory: apk.mandatory,
       });
     })();
+
+    // Re-check when the app comes back to the foreground (switch desktop→phone
+    // after publishing an OTA → it's picked up without a restart).
+    const sub = AppState.addEventListener('change', (s) => {
+      if (s === 'active') void runOta();
+    });
     return () => {
       cancelled = true;
+      sub.remove();
     };
   }, []);
 
@@ -65,6 +96,23 @@ export function UpdateGate() {
       setPhase('prompt'); // let them retry
     }
   };
+
+  // L1 (OTA / JS) bundle ready → offer an instant reload (no cold start).
+  // Shown only when no native-update dialog is up (APK prompt takes priority);
+  // dismissable, and it still applies on the next cold start regardless.
+  if (otaReady && !(release && phase !== 'idle')) {
+    return (
+      <AuraDialog
+        visible
+        title="新版本已就绪"
+        message="已拉取最新内容，点「立即重载」即刻生效（无需重启）。"
+        confirmLabel="立即重载"
+        onConfirm={() => { void applyOtaUpdate().catch(() => {}); }}
+        cancelLabel="稍后"
+        onClose={() => setOtaReady(false)}
+      />
+    );
+  }
 
   if (phase === 'idle' || !release) return null;
 

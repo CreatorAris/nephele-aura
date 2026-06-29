@@ -40,6 +40,16 @@ export async function checkOtaUpdate(): Promise<boolean> {
   }
 }
 
+/**
+ * Apply an already-fetched OTA bundle NOW by reloading the JS into it — no app
+ * restart, no cold start. Call after checkOtaUpdate() returned true and the user
+ * opted in (see UpdateGate's reload prompt). No-ops in dev / when OTA is off.
+ */
+export async function applyOtaUpdate(): Promise<void> {
+  if (__DEV__ || !Updates.isEnabled) return;
+  await Updates.reloadAsync();
+}
+
 // ---------------------------------------------------------------------------
 // L2 — APK self-update (Android, self-distributed)
 // ---------------------------------------------------------------------------
