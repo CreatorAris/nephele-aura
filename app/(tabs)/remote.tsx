@@ -399,10 +399,15 @@ export default function AssistantScreen() {
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [credits, setCredits] = useState<number | null>(null);
-  // Cloud model tier for standalone chat (desktop offline): Zephyr = fast/cheap,
-  // Tempest = full power + thinking (maps to /v1/chat/max model_tier). When the
-  // desktop is online, send() auto-routes to its full Cloud MAX agent instead.
+  // Cloud model tier for standalone chat: Zephyr = fast/cheap, Tempest = full
+  // power + thinking (maps to /v1/chat/max model_tier). This is the cheap
+  // default and is HONORED end-to-end (the desktop relay path below is not).
   const [tier, setTier] = useState<'zephyr' | 'tempest'>('zephyr');
+  // Explicit opt-in to route this chat to the desktop's full Cloud MAX agent
+  // (local library / files / references). The relay IGNORES the tier above and
+  // forces the desktop's full (Tempest) tier — heavy + pricey — so it's OFF by
+  // default and only offered when the desktop is online.
+  const [desktopMode, setDesktopMode] = useState(false);
   const [desktopOnline, setDesktopOnline] = useState(() => remoteWS.getDesktopOnline());
   const abortRef = useRef<AbortController | null>(null);
   // True while a desktop-agent turn is in flight, so the relay event handler
@@ -429,6 +434,7 @@ export default function AssistantScreen() {
   useEffect(() => remoteWS.onDesktopStateChange((online) => {
     setDesktopOnline(online);
     if (!online) {
+      setDesktopMode(false);  // the desktop opt-in is only valid while online
       // A desktop drop mid-turn would otherwise leave the message streaming
       // forever — finalize it with an error instead.
       if (awaitingDesktopRef.current) {
@@ -704,10 +710,10 @@ export default function AssistantScreen() {
     setStreaming(true);
     const t0 = Date.now();
 
-    // Desktop online → auto-route to its full Cloud MAX agent over the relay
-    // (local library / files / references / run_python); events come back via
-    // the onMessage subscription. Offline → cloud tier (Zephyr/Tempest) below.
-    const useDesktop = desktopOnline;
+    // Desktop opt-in (the "桌面" chip) → route to its full Cloud MAX agent over
+    // the relay (local library / files / references / run_python); events come
+    // back via the onMessage subscription. Default → cloud tier (Zephyr/Tempest).
+    const useDesktop = desktopMode && desktopOnline;
     if (useDesktop) {
       analytics.capture('assistant_message', { turn: history.length, mode: 'max_desktop' });
       awaitingDesktopRef.current = true;
@@ -761,7 +767,7 @@ export default function AssistantScreen() {
         analytics.capture('assistant_error', { mode, latency_ms: Date.now() - t0, message: String(msg).slice(0, 80) });
       },
     });
-  }, [input, streaming, messages, tier, desktopOnline, updateLast]);
+  }, [input, streaming, messages, tier, desktopMode, desktopOnline, updateLast]);
 
   const stop = useCallback(() => {
     if (awaitingDesktopRef.current) {
@@ -870,38 +876,40 @@ export default function AssistantScreen() {
 
             {/* Bottom toolbar — model-tier segmented control + send. */}
             <XStack paddingHorizontal={10} paddingBottom={8} paddingTop={4} alignItems="center" gap={8}>
-              {desktopOnline ? (
-                // Desktop online → send() auto-routes to its full Cloud MAX agent
-                // (local library / files / references). An indicator, not a toggle.
-                <XStack testID="desktop-full" borderRadius={9} borderWidth={1} height={28}
-                  paddingHorizontal={10} alignItems="center" gap={5}
-                  borderColor={colors.status.warning} backgroundColor="rgba(245,200,120,0.14)">
-                  <Monitor size={12} color={colors.status.warning} />
-                  <Text fontSize={12} fontWeight="700" letterSpacing={0.3} color={colors.status.warning}>桌面端在线 · 完整功能</Text>
-                </XStack>
-              ) : (
-                // Zephyr (fast/cheap) | Tempest (full power) — cloud tier picker.
-                <XStack borderRadius={9} borderWidth={1} borderColor={colors.border.default}
-                  overflow="hidden">
-                  {(['zephyr', 'tempest'] as const).map((t) => {
-                    const on = tier === t;
-                    return (
-                      <Pressable key={t} testID={`tier-${t}`} accessibilityState={{ selected: on }}
-                        onPress={() => setTier(t)} hitSlop={4}>
-                        <XStack height={26} paddingHorizontal={11} alignItems="center" gap={4}
-                          backgroundColor={on ? 'rgba(206,172,224,0.16)' : 'transparent'}>
-                          <Zap size={11} color={on ? colors.brand.primary : colors.text.tertiary}
-                            fill={on ? colors.brand.primary : 'transparent'} />
-                          <Text fontSize={12} fontWeight={on ? '700' : '500'} letterSpacing={0.3}
-                            color={on ? colors.brand.primary : colors.text.tertiary}>
-                            {t === 'zephyr' ? 'Zephyr' : 'Tempest'}
-                          </Text>
-                        </XStack>
-                      </Pressable>
-                    );
-                  })}
-                </XStack>
-              )}
+              {/* Engine picker: cheap cloud tiers (honored end-to-end) by default;
+                  the desktop's full agent is an explicit, heavier opt-in shown
+                  only when the desktop is online — selecting it forces the
+                  desktop's full (Tempest) tier over the relay. */}
+              <XStack borderRadius={9} borderWidth={1} borderColor={colors.border.default} overflow="hidden">
+                {(['zephyr', 'tempest'] as const).map((t) => {
+                  const on = !desktopMode && tier === t;
+                  return (
+                    <Pressable key={t} testID={`tier-${t}`} accessibilityState={{ selected: on }}
+                      onPress={() => { setTier(t); setDesktopMode(false); }} hitSlop={4}>
+                      <XStack height={26} paddingHorizontal={11} alignItems="center" gap={4}
+                        backgroundColor={on ? 'rgba(206,172,224,0.16)' : 'transparent'}>
+                        <Zap size={11} color={on ? colors.brand.primary : colors.text.tertiary}
+                          fill={on ? colors.brand.primary : 'transparent'} />
+                        <Text fontSize={12} fontWeight={on ? '700' : '500'} letterSpacing={0.3}
+                          color={on ? colors.brand.primary : colors.text.tertiary}>
+                          {t === 'zephyr' ? 'Zephyr' : 'Tempest'}
+                        </Text>
+                      </XStack>
+                    </Pressable>
+                  );
+                })}
+                {desktopOnline && (
+                  <Pressable testID="tier-desktop" accessibilityState={{ selected: desktopMode }}
+                    onPress={() => setDesktopMode(true)} hitSlop={4}>
+                    <XStack height={26} paddingHorizontal={11} alignItems="center" gap={4}
+                      backgroundColor={desktopMode ? 'rgba(245,200,120,0.16)' : 'transparent'}>
+                      <Monitor size={11} color={desktopMode ? colors.status.warning : colors.text.tertiary} />
+                      <Text fontSize={12} fontWeight={desktopMode ? '700' : '500'} letterSpacing={0.3}
+                        color={desktopMode ? colors.status.warning : colors.text.tertiary}>桌面</Text>
+                    </XStack>
+                  </Pressable>
+                )}
+              </XStack>
               <YStack flex={1} />
               <Pressable testID="composer-send" accessibilityLabel={streaming ? 'stop' : 'send'}
                 onPress={() => (streaming ? stop() : send())} disabled={!streaming && !input.trim()}>
