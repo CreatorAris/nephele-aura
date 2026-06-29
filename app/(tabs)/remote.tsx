@@ -8,7 +8,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useFocusEffect } from 'expo-router';
 import { Image } from 'expo-image';
 import Markdown from 'react-native-markdown-display';
-import { ArrowUp, Square, Sparkles, ChevronDown, ChevronUp, ChevronRight, Zap, Wrench, Check, X as XIcon, ImageOff, History, Plus } from 'lucide-react-native';
+import { ArrowUp, Square, Sparkles, ChevronDown, ChevronUp, ChevronRight, Zap, Monitor, Wrench, Check, X as XIcon, ImageOff, History, Plus } from 'lucide-react-native';
 import { colors } from '../../theme/colors';
 import { GlassCard } from '../../components/GlassCard';
 import { TAB_BAR_RAISED_CLEARANCE } from '../../components/FloatingTabBar';
@@ -126,7 +126,7 @@ function parsePickerImages(result: string): PickerImage[] {
 
 // Real prompts verified against the desktop agent (pulled from Cloud MAX run
 // history) — these exercise find_references end-to-end rather than generic chat.
-const SUGGESTIONS = ['帮我在 Pixiv 上找初音ミク的参考图', '找些怀旧主题的参考图', '帮我找赛博朋克场景的参考方向'];
+const SUGGESTIONS = ['最近有哪些值得关注的 AI 绘画工具？', '厚涂和赛璐璐上色有什么区别？', '赛博朋克场景的配色思路？'];
 
 // Markdown rendered with the dark theme tokens (mirrors desktop's MarkdownText).
 const mdStyles = {
@@ -399,13 +399,9 @@ export default function AssistantScreen() {
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [credits, setCredits] = useState<number | null>(null);
-  // MAX is the agentic mode. It runs on the DESKTOP's Cloud MAX loop over the
-  // relay (full local toolset: Eagle library / files / run_python), so it's
-  // only available while the desktop is online. Plain chat stays cloud-direct
-  // (/v1/chat/max) and works anywhere.
-  const [maxMode, setMaxMode] = useState(false);
-  // Cloud model tier for standalone chat (no desktop): Zephyr = fast/cheap,
-  // Tempest = full power + thinking. Maps to /v1/chat/max model_tier.
+  // Cloud model tier for standalone chat (desktop offline): Zephyr = fast/cheap,
+  // Tempest = full power + thinking (maps to /v1/chat/max model_tier). When the
+  // desktop is online, send() auto-routes to its full Cloud MAX agent instead.
   const [tier, setTier] = useState<'zephyr' | 'tempest'>('zephyr');
   const [desktopOnline, setDesktopOnline] = useState(() => remoteWS.getDesktopOnline());
   const abortRef = useRef<AbortController | null>(null);
@@ -428,12 +424,11 @@ export default function AssistantScreen() {
   const [kbHeight, setKbHeight] = useState(0);
   const [inputFocused, setInputFocused] = useState(false);
 
-  // Desktop presence gates MAX. If the desktop drops while MAX is on, fall the
-  // toggle back to chat so the next message doesn't silently go nowhere.
+  // Desktop presence drives routing (send auto-uses the desktop agent when
+  // online). A drop mid-turn must finalize the in-flight message.
   useEffect(() => remoteWS.onDesktopStateChange((online) => {
     setDesktopOnline(online);
     if (!online) {
-      setMaxMode(false);
       // A desktop drop mid-turn would otherwise leave the message streaming
       // forever — finalize it with an error instead.
       if (awaitingDesktopRef.current) {
@@ -709,9 +704,10 @@ export default function AssistantScreen() {
     setStreaming(true);
     const t0 = Date.now();
 
-    // MAX + desktop online → drive the desktop's Cloud MAX agent over the relay
-    // (full local toolset). Events come back via the onMessage subscription.
-    const useDesktop = maxMode && desktopOnline;
+    // Desktop online → auto-route to its full Cloud MAX agent over the relay
+    // (local library / files / references / run_python); events come back via
+    // the onMessage subscription. Offline → cloud tier (Zephyr/Tempest) below.
+    const useDesktop = desktopOnline;
     if (useDesktop) {
       analytics.capture('assistant_message', { turn: history.length, mode: 'max_desktop' });
       awaitingDesktopRef.current = true;
@@ -765,7 +761,7 @@ export default function AssistantScreen() {
         analytics.capture('assistant_error', { mode, latency_ms: Date.now() - t0, message: String(msg).slice(0, 80) });
       },
     });
-  }, [input, streaming, messages, maxMode, tier, desktopOnline, updateLast]);
+  }, [input, streaming, messages, tier, desktopOnline, updateLast]);
 
   const stop = useCallback(() => {
     if (awaitingDesktopRef.current) {
@@ -813,7 +809,7 @@ export default function AssistantScreen() {
               </YStack>
               <Text color={colors.text.primary} fontSize={16} fontWeight="700">问点什么</Text>
               <Text color={colors.text.tertiary} fontSize={13} textAlign="center" lineHeight={19}>
-                联网搜索 + 找参考方向，随身可用
+                联网搜索 · 创作问答，随身可用
               </Text>
               <YStack gap={8} width="100%" marginTop={4}>
                 {SUGGESTIONS.map((s) => (
@@ -874,27 +870,38 @@ export default function AssistantScreen() {
 
             {/* Bottom toolbar — model-tier segmented control + send. */}
             <XStack paddingHorizontal={10} paddingBottom={8} paddingTop={4} alignItems="center" gap={8}>
-              {/* Zephyr (fast/cheap) | Tempest (full power) — cloud tier picker. */}
-              <XStack borderRadius={9} borderWidth={1} borderColor={colors.border.default}
-                overflow="hidden">
-                {(['zephyr', 'tempest'] as const).map((t) => {
-                  const on = tier === t;
-                  return (
-                    <Pressable key={t} testID={`tier-${t}`} accessibilityState={{ selected: on }}
-                      onPress={() => setTier(t)} hitSlop={4}>
-                      <XStack height={26} paddingHorizontal={11} alignItems="center" gap={4}
-                        backgroundColor={on ? 'rgba(206,172,224,0.16)' : 'transparent'}>
-                        <Zap size={11} color={on ? colors.brand.primary : colors.text.tertiary}
-                          fill={on ? colors.brand.primary : 'transparent'} />
-                        <Text fontSize={12} fontWeight={on ? '700' : '500'} letterSpacing={0.3}
-                          color={on ? colors.brand.primary : colors.text.tertiary}>
-                          {t === 'zephyr' ? 'Zephyr' : 'Tempest'}
-                        </Text>
-                      </XStack>
-                    </Pressable>
-                  );
-                })}
-              </XStack>
+              {desktopOnline ? (
+                // Desktop online → send() auto-routes to its full Cloud MAX agent
+                // (local library / files / references). An indicator, not a toggle.
+                <XStack testID="desktop-full" borderRadius={9} borderWidth={1} height={28}
+                  paddingHorizontal={10} alignItems="center" gap={5}
+                  borderColor={colors.status.warning} backgroundColor="rgba(245,200,120,0.14)">
+                  <Monitor size={12} color={colors.status.warning} />
+                  <Text fontSize={12} fontWeight="700" letterSpacing={0.3} color={colors.status.warning}>桌面端在线 · 完整功能</Text>
+                </XStack>
+              ) : (
+                // Zephyr (fast/cheap) | Tempest (full power) — cloud tier picker.
+                <XStack borderRadius={9} borderWidth={1} borderColor={colors.border.default}
+                  overflow="hidden">
+                  {(['zephyr', 'tempest'] as const).map((t) => {
+                    const on = tier === t;
+                    return (
+                      <Pressable key={t} testID={`tier-${t}`} accessibilityState={{ selected: on }}
+                        onPress={() => setTier(t)} hitSlop={4}>
+                        <XStack height={26} paddingHorizontal={11} alignItems="center" gap={4}
+                          backgroundColor={on ? 'rgba(206,172,224,0.16)' : 'transparent'}>
+                          <Zap size={11} color={on ? colors.brand.primary : colors.text.tertiary}
+                            fill={on ? colors.brand.primary : 'transparent'} />
+                          <Text fontSize={12} fontWeight={on ? '700' : '500'} letterSpacing={0.3}
+                            color={on ? colors.brand.primary : colors.text.tertiary}>
+                            {t === 'zephyr' ? 'Zephyr' : 'Tempest'}
+                          </Text>
+                        </XStack>
+                      </Pressable>
+                    );
+                  })}
+                </XStack>
+              )}
               <YStack flex={1} />
               <Pressable testID="composer-send" accessibilityLabel={streaming ? 'stop' : 'send'}
                 onPress={() => (streaming ? stop() : send())} disabled={!streaming && !input.trim()}>
