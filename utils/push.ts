@@ -3,11 +3,15 @@
 // by plugins/withJPush; until a build includes it, requiring the module fails and
 // every call here no-ops (dormant). Init is deliberately deferred to after login
 // + consent, not app launch, so the SDK doesn't collect on cold start.
-import { Platform, AppState } from 'react-native';
+import { Platform, AppState, DeviceEventEmitter } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getToken } from './auth';
 import analytics from './analytics';
+
+// Emitted when the server fires a silent OTA-trigger push (extras.type === 'ota').
+// UpdateGate listens and pulls the bundle immediately — push-driven, no polling.
+export const OTA_TRIGGER_EVENT = 'aura-ota-trigger';
 
 const API_BASE = 'https://api.arisfusion.com';
 const CLIENT_TYPE = 'nephele-mobile-v1'; // matches the authed API calls in auth.ts/subscriptions.ts
@@ -23,6 +27,7 @@ const CONSENT_KEY = 'push_consent'; // 'granted' | 'denied' | unset
 
 let initialized = false;
 let appStateSub: { remove: () => void } | null = null;
+let otaListenerAdded = false;
 
 /** Read the stored subscription-push consent. null = never asked yet. */
 export async function getPushConsent(): Promise<'granted' | 'denied' | null> {
@@ -136,6 +141,18 @@ export async function initPush(opts?: { requestPermission?: boolean }): Promise<
     // that must not be dropped (it'd stack on dev fast-refresh / repeat init).
     if (!appStateSub) {
       appStateSub = AppState.addEventListener('change', (s) => { if (s === 'active') clearBadge(); });
+    }
+
+    // Silent OTA-trigger: the server fires a custom (透传) message after
+    // publishing a bundle; surface it as an app event so UpdateGate pulls the
+    // update at once (push-driven, no polling). Guarded against re-init stacking.
+    if (!otaListenerAdded && typeof JPush.addCustomMessageListener === 'function') {
+      JPush.addCustomMessageListener((msg: any) => {
+        let extras = msg?.extras;
+        if (typeof extras === 'string') { try { extras = JSON.parse(extras); } catch { extras = {}; } }
+        if (extras?.type === 'ota') DeviceEventEmitter.emit(OTA_TRIGGER_EVENT);
+      });
+      otaListenerAdded = true;
     }
 
     const registrationId = await getRegistrationId(JPush);

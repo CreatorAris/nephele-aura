@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { AppState, View } from 'react-native';
+import { AppState, DeviceEventEmitter, View } from 'react-native';
 import { YStack, XStack, Text } from 'tamagui';
 import { AuraDialog } from './AuraDialog';
 import { colors } from '../theme/colors';
@@ -10,6 +10,7 @@ import {
   downloadAndInstallApk,
   type AuraRelease,
 } from '../utils/updater';
+import { OTA_TRIGGER_EVENT } from '../utils/push';
 import analytics from '../utils/analytics';
 
 // Invisible gate mounted at the app root. On launch it:
@@ -70,9 +71,14 @@ export function UpdateGate() {
     const sub = AppState.addEventListener('change', (s) => {
       if (s === 'active') void runOta();
     });
+    // Push-driven: a silent OTA-trigger message (server fires it after publish)
+    // pulls the bundle immediately while the app is open — no polling, no
+    // foreground bounce. Falls back to the launch/foreground checks above.
+    const otaSub = DeviceEventEmitter.addListener(OTA_TRIGGER_EVENT, () => void runOta());
     return () => {
       cancelled = true;
       sub.remove();
+      otaSub.remove();
     };
   }, []);
 
