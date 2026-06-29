@@ -398,7 +398,6 @@ export default function AssistantScreen() {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
-  const [credits, setCredits] = useState<number | null>(null);
   // Cloud model tier for standalone chat: Zephyr = fast/cheap, Tempest = full
   // power + thinking (maps to /v1/chat/max model_tier). This is the cheap
   // default and is HONORED end-to-end (the desktop relay path below is not).
@@ -406,7 +405,8 @@ export default function AssistantScreen() {
   // Explicit opt-in to route this chat to the desktop's full Cloud MAX agent
   // (local library / files / references). The relay IGNORES the tier above and
   // forces the desktop's full (Tempest) tier — heavy + pricey — so it's OFF by
-  // default and only offered when the desktop is online.
+  // default. The 桌面 chip is always shown; if it's picked while the desktop is
+  // offline, send hints instead of silently falling back to a cloud tier.
   const [desktopMode, setDesktopMode] = useState(false);
   const [desktopOnline, setDesktopOnline] = useState(() => remoteWS.getDesktopOnline());
   const abortRef = useRef<AbortController | null>(null);
@@ -429,12 +429,13 @@ export default function AssistantScreen() {
   const [kbHeight, setKbHeight] = useState(0);
   const [inputFocused, setInputFocused] = useState(false);
 
-  // Desktop presence drives routing (send auto-uses the desktop agent when
-  // online). A drop mid-turn must finalize the in-flight message.
+  // Desktop presence only drives the header status + whether the 桌面 chip is
+  // usable; it no longer flips the user's selection. A drop mid-turn must still
+  // finalize the in-flight message.
   useEffect(() => remoteWS.onDesktopStateChange((online) => {
     setDesktopOnline(online);
     if (!online) {
-      setDesktopMode(false);  // the desktop opt-in is only valid while online
+      // Keep the user's 桌面 selection (header pill shows 离线; send hints).
       // A desktop drop mid-turn would otherwise leave the message streaming
       // forever — finalize it with an error instead.
       if (awaitingDesktopRef.current) {
@@ -632,9 +633,6 @@ export default function AssistantScreen() {
         setStreaming(false);
         analytics.capture('assistant_error', { mode: 'max_desktop', latency_ms: Date.now() - desktopT0Ref.current, message: String(d.error ?? '').slice(0, 80) });
         break;
-      case 'credits_updated':
-        if (typeof d.credits === 'number') setCredits(d.credits);
-        break;
     }
   }), [updateLast]);
 
@@ -699,6 +697,14 @@ export default function AssistantScreen() {
     const text = (preset ?? input).trim();
     if (!text || streaming) return;
 
+    // 桌面 chip selected but the desktop is offline → honest hint, never
+    // silently fall back to a cloud tier (that's the "shows X, ran Y" surprise
+    // we removed). The header pill already shows 离线; ask them to bring it up.
+    if (desktopMode && !desktopOnline) {
+      showToast('桌面未连接，请先在电脑上打开 Nephele');
+      return;
+    }
+
     const priorTurns: ChatTurn[] = messages.map((m) => ({ role: m.role, content: m.text }));
     const history: ChatTurn[] = [...priorTurns, { role: 'user' as const, content: text }];
     setMessages((prev) => [
@@ -736,9 +742,8 @@ export default function AssistantScreen() {
       onText: (d) => updateLast((m) => ({ ...m, text: m.text + d })),
       onThinking: (d) => updateLast((m) => ({ ...m, thinking: m.thinking + d })),
       onSources: (s) => updateLast((m) => ({ ...m, sources: [...m.sources, ...s] })),
-      onStamina: (cost, remaining) => {
+      onStamina: (cost) => {
         if (cost > 0) updateLast((m) => ({ ...m, stamina: cost }));
-        if (remaining != null) setCredits(remaining);
       },
       // Server-side tool loop: render a live tool row (running → done), same as
       // the desktop-relay path's tool_call_started/finished.
@@ -767,7 +772,7 @@ export default function AssistantScreen() {
         analytics.capture('assistant_error', { mode, latency_ms: Date.now() - t0, message: String(msg).slice(0, 80) });
       },
     });
-  }, [input, streaming, messages, tier, desktopMode, desktopOnline, updateLast]);
+  }, [input, streaming, messages, tier, desktopMode, desktopOnline, updateLast, showToast]);
 
   const stop = useCallback(() => {
     if (awaitingDesktopRef.current) {
@@ -796,13 +801,18 @@ export default function AssistantScreen() {
           <History size={20} color={colors.text.secondary} />
         </Pressable>
 
-        {credits != null && (
-          <XStack backgroundColor="rgba(206,172,224,0.10)" borderColor="rgba(206,172,224,0.22)" borderWidth={1}
-            borderRadius={13} paddingHorizontal={10} height={26} alignItems="center" gap={4}>
-            <YStack width={5} height={5} borderRadius={2.5} backgroundColor={colors.brand.primary} />
-            <Text color={colors.text.secondary} fontSize={12}>云晶 {credits.toLocaleString()}</Text>
-          </XStack>
-        )}
+        {/* Desktop presence lives here (out of the composer): online → the 桌面
+            chip in the composer can route to the full agent; offline → cloud
+            tiers only. */}
+        <XStack testID="desktop-status"
+          backgroundColor={desktopOnline ? 'rgba(126,200,217,0.10)' : 'rgba(255,255,255,0.04)'}
+          borderColor={desktopOnline ? 'rgba(126,200,217,0.28)' : colors.border.default} borderWidth={1}
+          borderRadius={13} paddingHorizontal={10} height={26} alignItems="center" gap={5}>
+          <Monitor size={12} color={desktopOnline ? colors.status.success : colors.text.muted} />
+          <Text color={desktopOnline ? colors.status.success : colors.text.tertiary} fontSize={12}>
+            {desktopOnline ? '桌面在线' : '桌面离线'}
+          </Text>
+        </XStack>
       </XStack>
 
       <YStack flex={1} paddingBottom={kbVisible ? kbHeight : 0}>
@@ -898,17 +908,18 @@ export default function AssistantScreen() {
                     </Pressable>
                   );
                 })}
-                {desktopOnline && (
-                  <Pressable testID="tier-desktop" accessibilityState={{ selected: desktopMode }}
-                    onPress={() => setDesktopMode(true)} hitSlop={4}>
-                    <XStack height={26} paddingHorizontal={11} alignItems="center" gap={4}
-                      backgroundColor={desktopMode ? 'rgba(245,200,120,0.16)' : 'transparent'}>
-                      <Monitor size={11} color={desktopMode ? colors.status.warning : colors.text.tertiary} />
-                      <Text fontSize={12} fontWeight={desktopMode ? '700' : '500'} letterSpacing={0.3}
-                        color={desktopMode ? colors.status.warning : colors.text.tertiary}>桌面</Text>
-                    </XStack>
-                  </Pressable>
-                )}
+                {/* 桌面 is always offered (stable selector); when the desktop is
+                    offline it's dimmed and send hints rather than vanishing. */}
+                <Pressable testID="tier-desktop" accessibilityState={{ selected: desktopMode }}
+                  onPress={() => setDesktopMode(true)} hitSlop={4}
+                  style={{ opacity: desktopOnline ? 1 : 0.5 }}>
+                  <XStack height={26} paddingHorizontal={11} alignItems="center" gap={4}
+                    backgroundColor={desktopMode ? 'rgba(245,200,120,0.16)' : 'transparent'}>
+                    <Monitor size={11} color={desktopMode ? colors.status.warning : colors.text.tertiary} />
+                    <Text fontSize={12} fontWeight={desktopMode ? '700' : '500'} letterSpacing={0.3}
+                      color={desktopMode ? colors.status.warning : colors.text.tertiary}>桌面</Text>
+                  </XStack>
+                </Pressable>
               </XStack>
               <YStack flex={1} />
               <Pressable testID="composer-send" accessibilityLabel={streaming ? 'stop' : 'send'}
