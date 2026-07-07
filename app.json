@@ -2,7 +2,7 @@
   "expo": {
     "name": "Nephele",
     "slug": "nephele-workshop",
-    "version": "0.1.2",
+    "version": "0.1.4",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -35,10 +35,9 @@
         "backgroundColor": "#1A1438"
       },
       "edgeToEdgeEnabled": true,
-      "usesCleartextTraffic": true,
       "softwareKeyboardLayoutMode": "resize",
       "package": "com.creatoraris.nephele.aura",
-      "versionCode": 3,
+      "versionCode": 5,
       "permissions": [
         "android.permission.REQUEST_INSTALL_PACKAGES"
       ]
@@ -88,6 +87,7 @@
       "./plugins/withHmsPush",
       "./plugins/withFcm",
       "./plugins/withBlockedPermissions",
+      "./plugins/withCleartext",
       "expo-secure-store"
     ],
     "extra": {

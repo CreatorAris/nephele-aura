@@ -14,7 +14,7 @@
 //   - #/alf useTheme / setSystemUITheme      -> backdrop is hardcoded black
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { PixelRatio, Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { ActivityIndicator, PixelRatio, Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { BlurView } from 'expo-blur';
 import { Download, FolderPlus, Share2 } from 'lucide-react-native';
@@ -93,7 +93,13 @@ export default function LightboxRoot({
   const openProgress = useSharedValue(0);
   const thumbRects = useSharedValue<Record<number, MeasuredDimensions | null>>({});
 
-  if (!activeLightbox && nextLightbox) {
+  // Sync prop changes while open too — updateImages() (full-res uri swaps
+  // landing over the relay) patches the context images mid-view; the old
+  // null-only guard froze the open-time snapshot, so a swapped image never
+  // rendered (原图永远停在缩略图, 2026-07-03). A null prop is deliberately
+  // NOT synced: the last lightbox keeps rendering through the close
+  // animation until onFullyClosed clears it.
+  if (nextLightbox && activeLightbox !== nextLightbox) {
     setActiveLightbox(nextLightbox);
   }
 
@@ -314,6 +320,9 @@ function LightboxView({
           const pos = e.nativeEvent.position;
           setImageIndex(pos);
           setLightboxIndex(pos);
+          // Let the caller lazy-load the swiped-to page's full-res image —
+          // the open-time request only covered the initially tapped item.
+          lightbox.onIndexChange?.(pos);
           // Reset zoom across page changes so the new page starts at 1:1.
           setIsScaled(false);
         }}
@@ -329,8 +338,13 @@ function LightboxView({
           // pages further than ±2 from active — at 18k items the extra
           // SharedValue / useDerivedValue / useAnimatedReaction setup adds up.
           const inWindow = Math.abs(i - imageIndex) <= 2;
+          // Key by position ONLY — a uri-bearing key remounts the page when
+          // the full-res swap lands, and react-native-pager-view loses its
+          // place on child churn (jumped to the next page, 2026-07-03). The
+          // uri swap must reach LightboxImage as a prop update, never as a
+          // remount; ImageItem resets its per-uri load state itself.
           return (
-            <View key={`${i}-${imageSrc.uri}`}>
+            <View key={i}>
               {inWindow ? (
                 <LightboxImage
                   onTap={onTap}
@@ -354,6 +368,19 @@ function LightboxView({
           );
         })}
       </PagerView>
+
+      {/* Transfer feedback — the active page is still the thumbnail while the
+          original travels desktop→R2→phone (can be seconds, with retries).
+          Without this pill the wait reads as "原图永远是糊的". Cleared by the
+          uri swap (preview:false) or by the retry-exhausted/failure paths. */}
+      {images[imageIndex]?.preview && (
+        <View style={styles.transferPill} pointerEvents="none">
+          <BlurView intensity={40} tint="dark" experimentalBlurMethod="dimezisBlurView" style={styles.transferPillInner}>
+            <ActivityIndicator size="small" color="#fff" />
+            <Text style={styles.cornerLabel}>原图传输中…</Text>
+          </BlurView>
+        </View>
+      )}
 
       {/* Save actions — auto-hiding bottom-right buttons + long-press menu.
           Real blur (dimezisBlurView) is safe here: a static Modal overlay, no
@@ -424,7 +451,12 @@ function LightboxImage({
   imageIndex: number;
 }) {
   const [fetchedDims, setFetchedDims] = useState<Dimensions | null>(null);
-  const dims = fetchedDims ?? imageSrc.dimensions ?? imageSrc.thumbDimensions;
+  // Metadata dims FIRST — they are the layout truth and never change.
+  // fetchedDims only fills the gap for items without metadata. Letting the
+  // decoded size win meant the thumb load and the later full-res swap load
+  // each nudged aspectRatio by a rounding epsilon → page content re-layout →
+  // ViewPager2 snapped to the next page on Android (2026-07-03 "加载完就跳").
+  const dims = imageSrc.dimensions ?? fetchedDims ?? imageSrc.thumbDimensions;
   let imageAspect: number | undefined;
   if (dims) {
     imageAspect = dims.width / dims.height;
@@ -602,6 +634,24 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.18)',
   },
   cornerLabel: { color: '#fff', fontSize: 13, fontWeight: '600' },
+  transferPill: {
+    position: 'absolute',
+    top: 64,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+  },
+  transferPillInner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 20,
+    overflow: 'hidden',  // clip the blur to the rounded pill
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+  },
   menuScrim: {
     position: 'absolute',
     top: 0, left: 0, right: 0, bottom: 0,

@@ -37,6 +37,10 @@ export type Lightbox = {
   // lightbox's pager position into their own state (e.g. Aura's DetailModal
   // jumps to whatever image the user landed on after swiping).
   onClose?: (finalIndex: number) => void;
+  // Invoked on every pager page change with the new index. Callers use this
+  // to lazy-load the full-resolution image for the page the user swiped to —
+  // the open-time request only covers the initially tapped item.
+  onIndexChange?: (index: number) => void;
   // Optional per-image actions. When present the pager shows auto-hiding
   // bottom-right buttons + a long-press menu; callers that omit it (gallery/
   // feed) get no chrome change.

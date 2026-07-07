@@ -14,11 +14,16 @@ import { OTA_TRIGGER_EVENT } from '../utils/push';
 import { getUserInfo } from '../utils/auth';
 import analytics from '../utils/analytics';
 
-// The developer's own account (jiaxinggan@foxmail.com). OTA bundles are pushed
-// to every device, but only this device surfaces the instant-reload prompt;
-// everyone else updates silently. Not a secret — just an account id, and the
-// popup gating is cosmetic.
-const DEV_UID = 'bdb56d39-2343-4798-8d20-a1f39f426d66';
+// The developer's own accounts. OTA bundles are pushed to every device, but
+// only these surface the instant-reload prompt; everyone else updates
+// silently. Not a secret — just account ids, and the popup gating is
+// cosmetic. Keep old ids listed: pushes deliver per-DEVICE (JPush regId), so
+// a phone re-logged into a new account still receives them, and the prompt
+// gate silently ate the popup for exactly that reason (2026-07-03).
+const DEV_UIDS = new Set([
+  'bdb56d39-2343-4798-8d20-a1f39f426d66', // jiaxinggan@foxmail.com (original dev account)
+  '8859b507-dda7-488b-89d3-293e4c906960', // current phone account
+]);
 
 // Invisible gate mounted at the app root.
 //   OTA (L1, JS bundle):
@@ -46,7 +51,7 @@ export function UpdateGate() {
   useEffect(() => {
     let cancelled = false;
     // Resolve dev identity once — only the dev device shows the reload prompt.
-    getUserInfo().then((u) => { if (!cancelled && u?.uid === DEV_UID) isDevRef.current = true; }).catch(() => {});
+    getUserInfo().then((u) => { if (!cancelled && u?.uid && DEV_UIDS.has(u.uid)) isDevRef.current = true; }).catch(() => {});
 
     // Check for an OTA bundle and stage it. Runs on launch AND every time the
     // app returns to the foreground, so a freshly published update is picked up

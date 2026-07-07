@@ -1,4 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Device from 'expo-device';
 import analytics from './analytics';
 
 const API_BASE = 'https://api.arisfusion.com';
@@ -8,7 +9,39 @@ const STORAGE_KEYS = {
   accessToken: 'nephele_access_token',
   refreshToken: 'nephele_refresh_token',
   userInfo: 'nephele_user_info',
+  deviceFp: 'nephele_device_fp',
 } as const;
+
+/**
+ * Stable per-install device fingerprint for the pairing registry (desktop
+ * session manager). Purely an identity handle — NOT the paid-device binding
+ * fp (we still never send X-Device-Fp, see getLicenseStatus). Persisted so
+ * re-pairing updates the same registry entry instead of appending a new one.
+ */
+async function getDeviceFp(): Promise<string> {
+  try {
+    const existing = await AsyncStorage.getItem(STORAGE_KEYS.deviceFp);
+    if (existing) return existing;
+    // Not a security credential, just a registry handle — Math.random is
+    // fine and avoids a crypto polyfill (Hermes has no Web Crypto).
+    let fp = Date.now().toString(16);
+    while (fp.length < 16) fp += Math.floor(Math.random() * 16).toString(16);
+    fp = fp.slice(0, 16);
+    await AsyncStorage.setItem(STORAGE_KEYS.deviceFp, fp);
+    return fp;
+  } catch {
+    return '';
+  }
+}
+
+/** Human-readable device name for the desktop session manager. */
+function getDeviceName(): string {
+  try {
+    return (Device.modelName || Device.deviceName || '').slice(0, 48);
+  } catch {
+    return '';
+  }
+}
 
 export type UserInfo = {
   uid: string;
@@ -171,7 +204,12 @@ export async function isLoggedIn(): Promise<boolean> {
   const token = await getToken();
   if (!token || token.length === 0) return false;
   if (isTokenExpired(token)) {
-    // Wipe the stale token so subsequent reads don't keep returning it
+    // An expired ACCESS token is normal (30d) while the refresh token is
+    // still good (90d) — rotate instead of logging out. Hard-logging-out
+    // here wiped the valid RT and forced a QR re-pair every 30 days; the
+    // agent 401-retry was the only path that ever refreshed.
+    if (await refreshAccessToken()) return true;
+    // No RT or rotation refused (revoked/expired) — now it's a real logout.
     await logout();
     return false;
   }
@@ -220,10 +258,15 @@ export async function getLicenseStatus(): Promise<LicenseStatus | null> {
  */
 export async function exchangePairingToken(token: string): Promise<LoginResult> {
   try {
+    // device_fp/device_name feed the desktop's session manager (设备列表 +
+    // 解除配对). Both optional server-side: older builds omitting them get a
+    // server-minted fp and a generic name.
+    const deviceFp = await getDeviceFp();
+    const deviceName = getDeviceName();
     const res = await fetch(`${API_BASE}/auth/pairing/exchange`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Client-Type': CLIENT_TYPE },
-      body: JSON.stringify({ token }),
+      body: JSON.stringify({ token, device_fp: deviceFp, device_name: deviceName }),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -259,21 +302,40 @@ export async function exchangePairingToken(token: string): Promise<LoginResult> 
   }
 }
 
-export async function refreshAccessToken(): Promise<boolean> {
+// Single-flight: rotation is single-use server-side (the old RT dies on
+// first use), so two concurrent callers — e.g. two screens' focus effects
+// both hitting isLoggedIn() — must share one request or the loser burns the
+// fresh RT and hard-logs the account out.
+let refreshInflight: Promise<boolean> | null = null;
+
+export function refreshAccessToken(): Promise<boolean> {
+  if (refreshInflight) return refreshInflight;
+  refreshInflight = doRefreshAccessToken().finally(() => { refreshInflight = null; });
+  return refreshInflight;
+}
+
+async function doRefreshAccessToken(): Promise<boolean> {
   try {
     const refreshToken = await AsyncStorage.getItem(STORAGE_KEYS.refreshToken);
     if (!refreshToken) return false;
 
     const res = await fetch(`${API_BASE}/auth/refresh`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Client-Type': CLIENT_TYPE },
       body: JSON.stringify({ refresh_token: refreshToken }),
     });
 
     const data = await res.json();
-    if (!res.ok || !data.access_token) return false;
+    // Server returns {token, refresh_token} (rotation: the old RT is dead the
+    // moment the server answers). The old `data.access_token` check never
+    // matched and the rotated RT was never stored — one refresh attempt burned
+    // the chain and the session hard-died at JWT expiry.
+    const newToken = data.token || data.access_token;
+    if (!res.ok || !newToken) return false;
 
-    await AsyncStorage.setItem(STORAGE_KEYS.accessToken, data.access_token);
+    const pairs: [string, string][] = [[STORAGE_KEYS.accessToken, newToken]];
+    if (data.refresh_token) pairs.push([STORAGE_KEYS.refreshToken, data.refresh_token]);
+    await AsyncStorage.multiSet(pairs);
     return true;
   } catch { return false; }
 }

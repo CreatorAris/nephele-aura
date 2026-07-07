@@ -35,6 +35,7 @@ import { colors } from '../../theme/colors';
 import { TAB_BAR_CLEARANCE } from '../../components/FloatingTabBar';
 import { uploadBus } from '../../utils/uploadBus';
 import { AuraActionSheet } from '../../components/AuraActionSheet';
+import { GalleryPicker, type PickedAsset } from '../../components/GalleryPicker';
 import { AuraDialog } from '../../components/AuraDialog';
 import { GlassCard } from '../../components/GlassCard';
 import * as ImagePicker from 'expo-image-picker';
@@ -120,6 +121,9 @@ export default function GalleryScreen() {
   // renders as a sibling Modal at screen level (the working pattern).
   const [pendingTrashId, setPendingTrashId] = useState<string | null>(null);
   const [fileServerUrl, setFileServerUrl] = useState<string | null>(null);
+  // Bearer token the desktop minted for its LAN /import endpoint, announced
+  // alongside fileServerUrls. A ref (not state) — it gates uploads, not render.
+  const uploadTokenRef = useRef<string>('');
   // Full-resolution image urls that arrived via the R2 relay (non-LAN), keyed
   // by item id. The lightbox swaps its thumbnail uri for these as they land.
   const [fullImages, setFullImages] = useState<Record<string, string>>({});
@@ -152,6 +156,10 @@ export default function GalleryScreen() {
     | { stage: 'importing'; uploaded: number; total: number; progress: number; failed: number }
     | { stage: 'done'; processed: number; failed: number; total: number };
   const [importState, setImportState] = useState<ImportState>({ stage: 'idle' });
+  // Client-side upload failures, carried into the final 'done' state — the
+  // desktop's result event only counts the refs it received, so without this
+  // "2 张上传失败" silently became "全部成功" when the import round-trip landed.
+  const uploadFailedRef = useRef(0);
   // AI auto-tag (WD14) over the selected items — runs on the desktop, progress
   // streams back over the relay keyed by autoTagReqRef so stale runs are ignored.
   type AutoTagState =
@@ -161,6 +169,7 @@ export default function GalleryScreen() {
   const [autoTagState, setAutoTagState] = useState<AutoTagState>({ stage: 'idle' });
   const autoTagReqRef = useRef('');
   const [importSheetVisible, setImportSheetVisible] = useState(false);
+  const [galleryVisible, setGalleryVisible] = useState(false);
 
   // Search & filter state
   const [searchQuery, setSearchQuery] = useState('');
@@ -370,62 +379,103 @@ export default function GalleryScreen() {
   // per-item progress). Imports into the currently active folder if one is
   // selected.
   const processAssets = useCallback(async (
-    assets: { uri: string; mimeType?: string | null }[],
+    assets: { uri: string; mimeType?: string | null; fileName?: string | null }[],
     source: 'gallery' | 'camera' | 'share' = 'gallery',
   ) => {
     const total = assets.length;
-    const urls: string[] = [];
+    let done = 0;
     let failed = 0;
     analytics.capture('image_import_started', { source, total });
+    uploadFailedRef.current = 0;
     setImportState({ stage: 'uploading', current: 0, total, failed: 0 });
 
-    for (let i = 0; i < assets.length; i++) {
+    const lanUrl = fileServerUrl;
+    const lanToken = uploadTokenRef.current;
+    const useLan = !!(lanUrl && lanToken);
+
+    const stripExt = (fn?: string | null) => {
+      if (!fn) return '';
+      const i = fn.lastIndexOf('.');
+      return (i > 0 ? fn.slice(0, i) : fn).trim();
+    };
+
+    // Index-aligned so the Eagle item name lines up with each ref; null = failed.
+    const refs: (string | null)[] = new Array(total).fill(null);
+    const names: string[] = new Array(total).fill('');
+
+    const uploadOne = async (i: number) => {
       const a = assets[i];
+      const mime = a.mimeType || (a.uri.endsWith('.png') ? 'image/png' : 'image/jpeg');
+      const ext = mime === 'image/png' ? 'png'
+        : mime === 'image/webp' ? 'webp'
+        : mime === 'image/gif' ? 'gif'
+        : (mime === 'image/heic' || mime === 'image/heif') ? 'heic'
+        : 'jpg';
+      const key = `remote_${Date.now().toString(36)}_${i}.${ext}`;
       try {
-        const mime = a.mimeType || (a.uri.endsWith('.png') ? 'image/png' : 'image/jpeg');
-        const url = await RemoteWebSocket.uploadImage(a.uri, mime);
-        urls.push(url);
+        let ref: string;
+        if (useLan) {
+          try {
+            ref = await RemoteWebSocket.uploadImageLAN(a.uri, mime, lanUrl!, lanToken, key);
+          } catch (e) {
+            // LAN failed for this item — fall back to R2 so the batch still lands.
+            console.warn('[import] LAN upload failed, falling back to R2', e);
+            ref = await RemoteWebSocket.uploadImage(a.uri, mime, key);
+          }
+        } else {
+          ref = await RemoteWebSocket.uploadImage(a.uri, mime, key);
+        }
+        refs[i] = ref;
+        names[i] = stripExt(a.fileName);   // preserve the original gallery filename
       } catch (e) {
         failed += 1;
+        uploadFailedRef.current = failed;
         console.warn('[import] upload failed', e);
+      } finally {
+        done += 1;
+        setImportState({ stage: 'uploading', current: done, total, failed });
       }
-      setImportState({ stage: 'uploading', current: i + 1, total, failed });
+    };
+
+    // Bounded concurrency: LAN is cheap, the cloud path wants a gentler radio.
+    const limit = Math.min(useLan ? 6 : 3, total);
+    let next = 0;
+    await Promise.all(
+      Array.from({ length: limit }, async () => {
+        while (next < total) await uploadOne(next++);
+      }),
+    );
+
+    const okRefs: string[] = [];
+    const okNames: string[] = [];
+    for (let i = 0; i < total; i++) {
+      if (refs[i]) { okRefs.push(refs[i]!); okNames.push(names[i]); }
     }
 
-    if (urls.length === 0) {
+    if (okRefs.length === 0) {
       setImportState({ stage: 'done', processed: 0, failed, total });
       return;
     }
 
     setImportState({
-      stage: 'importing', uploaded: urls.length, total,
+      stage: 'importing', uploaded: okRefs.length, total,
       progress: 0, failed,
     });
-    remoteWS.importFiles(urls, { folderId: activeFolder?.id });
-  }, [activeFolder]);
+    remoteWS.importFiles(okRefs, { folderId: activeFolder?.id, names: okNames });
+  }, [activeFolder, fileServerUrl]);
 
-  const importFromGallery = useCallback(async () => {
+  // Open the in-app gallery (components/GalleryPicker). The system picker routed
+  // to Files/DocumentsUI on GMS-less ROMs and backgrounded the app mid-import;
+  // the in-app grid is direct-to-gallery and keeps the relay socket alive.
+  const importFromGallery = useCallback(() => {
     if (importState.stage !== 'idle' && importState.stage !== 'done') return;
-    try {
-      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (!perm.granted) {
-        Alert.alert('需要相册权限', '请在系统设置里开启 Nephele 的相册访问。');
-        return;
-      }
-      const picked = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ['images'],
-        allowsMultipleSelection: true,
-        selectionLimit: 20,
-        quality: 1,
-      });
-      if (picked.canceled || picked.assets.length === 0) return;
-      await processAssets(picked.assets, 'gallery');
-    } catch (e) {
-      console.warn('[import] aborted', e);
-      setImportState({ stage: 'idle' });
-      Alert.alert('导入失败', String(e));
-    }
-  }, [importState.stage, processAssets]);
+    setGalleryVisible(true);
+  }, [importState.stage]);
+
+  const onGalleryConfirm = useCallback((picked: PickedAsset[]) => {
+    setGalleryVisible(false);
+    if (picked.length) processAssets(picked, 'gallery');
+  }, [processAssets]);
 
   const importFromCamera = useCallback(async () => {
     if (importState.stage !== 'idle' && importState.stage !== 'done') return;
@@ -486,6 +536,7 @@ export default function GalleryScreen() {
       .map(f => ({
         uri: f.path.startsWith('file://') ? f.path : `file://${f.path}`,
         mimeType: f.mimeType,
+        fileName: f.fileName ?? null,
       }));
     if (assets.length === 0) {
       resetShareIntent();
@@ -517,17 +568,39 @@ export default function GalleryScreen() {
           failed: d.failed ?? 0,
           total: d.total ?? 0,
         });
-        setImportState({
+        setImportState(prev => ({
           stage: 'done',
           processed: d.processed ?? 0,
-          failed: d.failed ?? 0,
-          total: d.total ?? 0,
-        });
+          // Desktop counts only the refs it received; upload failures
+          // happened before that and must be merged back in.
+          failed: (d.failed ?? 0) + uploadFailedRef.current,
+          total: prev.stage === 'importing' || prev.stage === 'uploading'
+            ? prev.total
+            : (d.total ?? 0) + uploadFailedRef.current,
+        }));
         refreshOnImportRef.current();
       }
     });
     return unsub;
   }, []);
+
+  // Watchdog for the import modal: the only exit from 'importing' is the
+  // desktop's result event, and a relay flap can eat it (the same loss mode
+  // this file documents for full images). 3min without ANY progress → settle
+  // to 'done' with the unaccounted remainder shown as failed, instead of
+  // wedging a non-dismissable full-screen modal until force-kill.
+  useEffect(() => {
+    if (importState.stage !== 'uploading' && importState.stage !== 'importing') return;
+    const t = setTimeout(() => {
+      setImportState(prev => {
+        if (prev.stage !== 'uploading' && prev.stage !== 'importing') return prev;
+        analytics.capture('image_import_watchdog_fired', { stage: prev.stage });
+        const done = prev.stage === 'importing' ? prev.progress : prev.current;
+        return { stage: 'done', processed: done, failed: Math.max(0, prev.total - done), total: prev.total };
+      });
+    }, 180_000);
+    return () => clearTimeout(t);
+  }, [importState]);
 
   // Single-item trash (P2.6) — confirms in caller, removes optimistically
   const trashItemOptimistic = useCallback((itemId: string) => {
@@ -561,6 +634,64 @@ export default function GalleryScreen() {
     setBatchPanel(null);
   }, [batchTagDraft, batchAddTag]);
 
+  // Full-image responses are lost to relay flaps just like thumbnails — but
+  // thumbs retry (thumbRequested + THUMB_RETRY_MS) and originals didn't, so
+  // one dropped event left the lightbox on the thumbnail forever (2026-07-02,
+  // confirmed via probes: desktop sent 4 URLs, phone received 1). Track
+  // pending requests and re-fire until the URL lands; the desktop answers
+  // retries from _r2_cache, so they cost one small WS round trip.
+  const fullImageReq = useRef<Map<string, { attempts: number; last: number }>>(new Map());
+
+  const requestFullImageTracked = useCallback((id: string) => {
+    fullImageReq.current.set(id, { attempts: 1, last: Date.now() });
+    remoteWS.requestFullImage(id);
+  }, []);
+
+  // Ref mirrors so lightbox callbacks (invoked long after open) read live
+  // state instead of the open-time closure snapshot.
+  const fullImagesRef = useRef(fullImages);
+  fullImagesRef.current = fullImages;
+  const fileServerUrlRef = useRef(fileServerUrl);
+  fileServerUrlRef.current = fileServerUrl;
+  const indexChangeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Relay full-res URLs die with the R2 bucket's 1h lifecycle purge (the
+  // desktop refreshes its own cache at 50min). A session-cached URL past that
+  // is a dead 404 link — treat it as a miss so the lightbox re-requests,
+  // instead of rendering the dead link with no pill and no retry.
+  const fullImageAt = useRef<Record<string, number>>({});
+  const FULL_URL_TTL_MS = 45 * 60 * 1000;
+  const freshFull = useCallback((id: string): string | undefined => {
+    const url = fullImagesRef.current[id];
+    if (!url) return undefined;
+    return Date.now() - (fullImageAt.current[id] ?? 0) < FULL_URL_TTL_MS ? url : undefined;
+  }, []);
+
+  useEffect(() => {
+    const FULL_RETRY_MS = 8000;
+    const FULL_RETRY_MAX = 6;
+    const t = setInterval(() => {
+      const pending = fullImageReq.current;
+      if (pending.size === 0) return;
+      const now = Date.now();
+      for (const [id, st] of pending) {
+        if (st.attempts >= FULL_RETRY_MAX) {
+          pending.delete(id);
+          analytics.capture('full_image_retry_exhausted', { item: id });
+          // No full-res is coming — drop the transfer pill, keep the thumb.
+          updateImages(imgs => imgs.map(im => (im.id === id ? { ...im, preview: false } : im)));
+          continue;
+        }
+        if (now - st.last >= FULL_RETRY_MS) {
+          st.attempts += 1;
+          st.last = now;
+          remoteWS.requestFullImage(id);
+        }
+      }
+    }, 2000);
+    return () => clearInterval(t);
+  }, []);
+
   // Build the lightbox image array for all current items and open at the
   // tapped one. thumbRef is only attached to the active image — the others
   // have no hero anchor and the close animation will simply fade for them.
@@ -579,15 +710,20 @@ export default function GalleryScreen() {
         const dims = it.width && it.height
           ? { width: it.width, height: it.height }
           : null;
+        const landedFull = freshFull(it.id);
         const fullUri = fileServerUrl
           ? `${fileServerUrl}/full/${it.id}`
-          : (fullImages[it.id] ?? thumbs[it.id] ?? '');
+          : (landedFull ?? thumbs[it.id] ?? '');
         const thumbUri = fileServerUrl
           ? `${fileServerUrl}/thumb/${it.id}`
           : (thumbs[it.id] ?? '');
         return {
           id: it.id,
           uri: fullUri,
+          // Non-LAN without a landed full URL: the lightbox opens on the
+          // thumbnail while the original travels desktop→R2→phone — flag it
+          // so the pager can show transfer feedback instead of silent blur.
+          preview: !fileServerUrl && !landedFull,
           tags: it.tags,
           dimensions: dims,
           thumbUri,
@@ -610,16 +746,32 @@ export default function GalleryScreen() {
           const tgt = itemsRef.current[finalIndex];
           if (tgt) setDetailItem(tgt);
         },
+        // Swiped-to pages need their own full-res request — the open-time
+        // request above only covers the tapped item, so before this hook a
+        // swipe landed on a page whose transfer pill spun with no request in
+        // flight (2026-07-03 "滑动后加载卡住"). Debounced so a fast fling
+        // only fetches the page the user settles on.
+        onIndexChange: (i: number) => {
+          if (indexChangeTimer.current) clearTimeout(indexChangeTimer.current);
+          indexChangeTimer.current = setTimeout(() => {
+            const it = itemsRef.current[i];
+            if (!it) return;
+            if (fileServerUrlRef.current) return;          // LAN pages load /full/ directly
+            if (freshFull(it.id)) return;                 // already landed (and fresh)
+            if (fullImageReq.current.has(it.id)) return;   // request in flight
+            requestFullImageTracked(it.id);
+          }, 350);
+        },
       });
 
       // Non-LAN: the lightbox opened on the (512px) thumbnail. Ask the desktop
       // to push the full-resolution original through the R2 relay; the
       // eagle_full_image handler swaps it in when it lands.
-      if (!fileServerUrl && !fullImages[targetItem.id]) {
-        remoteWS.requestFullImage(targetItem.id);
+      if (!fileServerUrl && !freshFull(targetItem.id)) {
+        requestFullImageTracked(targetItem.id);
       }
     },
-    [items, fileServerUrl, thumbs, fullImages, openLightboxControl],
+    [items, fileServerUrl, thumbs, fullImages, freshFull, openLightboxControl, requestFullImageTracked],
   );
 
   // Pending rollback listeners — each updateItemOptimistic registers one on
@@ -705,7 +857,11 @@ export default function GalleryScreen() {
       setFileServerUrl(winner);
       remoteWS.setTransport('lan');
     } catch {
-      // all probes failed — leave fileServerUrl null so WS path kicks in
+      // All probes failed. Also clear any previously-probed LAN URL: after a
+      // LAN→WAN network switch the stale value would otherwise stick forever —
+      // the lightbox keeps building dead 192.168.x /full/ URLs and the
+      // `!fileServerUrl` guard suppresses the relay fallback request.
+      setFileServerUrl(null);
       remoteWS.setTransport('relay');
     }
   }, []);
@@ -715,15 +871,23 @@ export default function GalleryScreen() {
     const unsub = remoteWS.onMessage((msg: RemoteMessage) => {
       if (!msg.data) return;
       if (msg.type === 'status') {
-        const d = msg.data as { fileServerUrls?: string[] };
-        if (d.fileServerUrls?.length) probeFileServers(d.fileServerUrls);
-        else remoteWS.setTransport('relay');   // no LAN candidates → relay
+        const d = msg.data as { fileServerUrls?: string[]; uploadToken?: string };
+        if (d.uploadToken) uploadTokenRef.current = d.uploadToken;
+        if (d.fileServerUrls?.length) {
+          probeFileServers(d.fileServerUrls);
+        } else {
+          // No LAN candidates → relay; drop a stale LAN URL too (desktop may
+          // have restarted with its file server disabled).
+          setFileServerUrl(null);
+          remoteWS.setTransport('relay');
+        }
         return;
       }
       if (msg.type !== 'event') return;
 
       if (msg.action === 'file_server') {
-        const d = msg.data as { url?: string };
+        const d = msg.data as { url?: string; uploadToken?: string };
+        if (d.uploadToken) uploadTokenRef.current = d.uploadToken;
         if (d.url) probeFileServers([d.url]);
       }
       if (msg.action === 'eagle_folders') {
@@ -761,9 +925,35 @@ export default function GalleryScreen() {
         const d = msg.data as { itemId?: string; url?: string; error?: string };
         if (d.itemId && d.url) {
           const id = d.itemId, fullUrl = d.url;
-          setFullImages(prev => (prev[id] ? prev : { ...prev, [id]: fullUrl }));
+          fullImageReq.current.delete(id);
+          // Diagnostic probes (2026-07 原图不显示): confirm the URL reached the
+          // phone and whether the open lightbox actually matched the item.
+          console.log('[Gallery] full image url landed:', id, fullUrl.slice(0, 90));
+          analytics.capture('full_image_url_landed', { item: id });
+          // Overwrite (no first-wins guard): a TTL-expired entry re-requests
+          // and the fresh URL must replace the dead one.
+          fullImageAt.current[id] = Date.now();
+          setFullImages(prev => ({ ...prev, [id]: fullUrl }));
           // If the lightbox is open on this item, swap its source to full-res.
-          updateImages(imgs => imgs.map(im => (im.id === id ? { ...im, uri: fullUrl } : im)));
+          updateImages(imgs => {
+            const hit = imgs.some(im => im.id === id);
+            console.log('[Gallery] lightbox swap:', id, hit ? 'matched' : 'NO MATCH', 'of', imgs.length);
+            if (!hit) analytics.capture('lightbox_swap_no_match', { item: id, images: imgs.length });
+            return imgs.map(im => (im.id === id ? { ...im, uri: fullUrl, preview: false } : im));
+          });
+        } else if (d.error) {
+          // Desktop answered with a failure — the request wasn't lost, so
+          // retrying won't change the outcome; stop the loss-retry loop and
+          // drop the transfer pill (no full-res is coming).
+          if (d.itemId) {
+            const failedId = d.itemId;
+            fullImageReq.current.delete(failedId);
+            updateImages(imgs => imgs.map(im => (im.id === failedId ? { ...im, preview: false } : im)));
+          }
+          // The lightbox keeps the thumbnail; leave a trace — this path used
+          // to be silent on both ends, which made "原图传不了" undiagnosable.
+          console.warn('[Gallery] full image failed:', d.itemId, d.error);
+          analytics.capture('full_image_failed', { reason: String(d.error).slice(0, 80) });
         }
       }
       // Folder mutations (P2.5): refetch folder list when the server confirms
@@ -907,6 +1097,10 @@ export default function GalleryScreen() {
   const wasConnectedRef = useRef(false);
   useEffect(() => {
     if (connected && !wasConnectedRef.current && hasLoadedRef.current) {
+      // A reconnect usually means a network change (WiFi↔cellular), which
+      // flips LAN reachability in both directions — re-probe unconditionally
+      // instead of trusting the fileServerUrl from the previous network.
+      remoteWS.requestStatus();
       doSearch(searchParamsRef.current);
     }
     wasConnectedRef.current = connected;
@@ -1073,6 +1267,17 @@ export default function GalleryScreen() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fileServerUrl, selectMode, selectedIds, toggleSelected, enterSelectMode, thumbsVersion, onThumbError]);
 
+  // Rendered on EVERY return path (offline screens included): the in-app
+  // picker was built to survive connection loss, so a transient relay flap
+  // mid-selection must not unmount it and wipe the user's selection.
+  const galleryPickerEl = (
+    <GalleryPicker
+      visible={galleryVisible}
+      onClose={() => setGalleryVisible(false)}
+      onConfirm={onGalleryConfirm}
+    />
+  );
+
   if (!connected) {
     // The ONLY actionable disconnected case: relay is up but the desktop app
     // isn't running (and the pairing status has had time to land). Cold start,
@@ -1106,6 +1311,7 @@ export default function GalleryScreen() {
               </XStack>
             </Pressable>
           </YStack>
+          {galleryPickerEl}
         </SafeAreaView>
       );
     }
@@ -1121,6 +1327,7 @@ export default function GalleryScreen() {
           </YStack>
           <Text color={colors.text.tertiary} fontSize={14}>正在连接桌面端…</Text>
         </YStack>
+        {galleryPickerEl}
       </SafeAreaView>
     );
   }
@@ -1325,6 +1532,9 @@ export default function GalleryScreen() {
           // Pull-to-refresh: only show the native spinner when we already have
           // data — initial / filter-change loads route through SkeletonGrid
           // instead (the list is unmounted then, RefreshControl wouldn't render).
+          // The spinner spawns at the list viewport's top edge, which sits
+          // BEHIND the frosted overlay header — offset it below the header.
+          progressViewOffset={listTopPad}
           refreshing={loading && items.length > 0}
           onRefresh={() => doSearch(searchParamsRef.current)}
           ListEmptyComponent={
@@ -1462,6 +1672,7 @@ export default function GalleryScreen() {
           item={detailItem}
           items={items}
           getThumb={(id) => (fileServerUrl ? `${fileServerUrl}/thumb/${id}` : thumbs[id])}
+          getFull={(id) => (fileServerUrl ? `${fileServerUrl}/full/${id}` : (freshFull(id) ?? thumbs[id]))}
           onIndexChange={(i) => {
             const tgt = itemsRef.current[i];
             if (tgt) setDetailItem(tgt);
@@ -1501,6 +1712,8 @@ export default function GalleryScreen() {
           { label: '从相册选', icon: ImageIcon, onPress: importFromGallery },
         ]}
       />
+
+      {galleryPickerEl}
 
       {/* Import progress modal */}
       <ImportProgressModal
@@ -1922,7 +2135,11 @@ function ImportProgressModal({ state, onDismiss }: {
   onDismiss: () => void;
 }) {
   if (state.stage === 'idle') return null;
-  const dismissable = state.stage === 'done';
+  // 'importing' is a pure wait on the desktop — allow backgrounding it (the
+  // result event re-opens the modal at 'done' to report the outcome).
+  // 'uploading' stays modal: the local upload loop is still driving state and
+  // would immediately re-surface it anyway.
+  const dismissable = state.stage === 'done' || state.stage === 'importing';
 
   let title = '';
   let body: React.ReactNode = null;
@@ -1974,7 +2191,9 @@ function ImportProgressModal({ state, onDismiss }: {
           {body}
           {dismissable && (
             <Pressable onPress={onDismiss} hitSlop={6} style={{ marginTop: 16 }}>
-              <Text fontSize={14} color={colors.brand.primary} fontWeight="600" textAlign="center">关闭</Text>
+              <Text fontSize={14} color={colors.brand.primary} fontWeight="600" textAlign="center">
+                {state.stage === 'done' ? '关闭' : '转入后台'}
+              </Text>
             </Pressable>
           )}
         </Pressable>
@@ -2090,11 +2309,12 @@ function FolderNameDialog({ state, onSubmit, onClose }: {
 // paper background) — kept here only as a comment for design intent
 // archaeology, in case we want to revisit a more distinct voice later.
 
-function DetailModal({ item, items, getThumb, onClose, onOpenLightbox,
+function DetailModal({ item, items, getThumb, getFull, onClose, onOpenLightbox,
                       onIndexChange, onUpdateItem, onTrash }: {
   item: LibraryItem | null;
   items: LibraryItem[];
   getThumb: (id: string) => string | undefined;
+  getFull: (id: string) => string | undefined;
   onClose: () => void;
   onOpenLightbox: (item: LibraryItem, thumbRef: AnimatedRef<any>) => void;
   // Fired when the user swipes the hero pager to a different page. Parent
@@ -2273,6 +2493,7 @@ function DetailModal({ item, items, getThumb, onClose, onOpenLightbox,
                 const isActive = i === currentIndex;
                 const inWindow = Math.abs(i - currentIndex) <= 1;
                 const thumbIt = getThumb(it.id);
+                const fullIt = getFull(it.id);
                 return (
                   <View key={it.id} style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
                     {inWindow && (
@@ -2283,16 +2504,19 @@ function DetailModal({ item, items, getThumb, onClose, onOpenLightbox,
                           collapsable={false}
                           style={{
                             width: imgW - 8, height: '100%',
-                            backgroundColor: thumbIt ? 'transparent' : colors.bg.thumb,
+                            backgroundColor: fullIt ? 'transparent' : colors.bg.thumb,
                             borderRadius: 12, overflow: 'hidden',
                           }}
                         >
-                          {thumbIt ? (
-                            <Image source={thumbIt}
+                          {fullIt ? (
+                            // Original (/full) — the thumbnail (/thumb is 480px) was
+                            // blurry for large images. Thumb/blurhash is the instant
+                            // placeholder while the full-res loads over LAN.
+                            <Image source={fullIt}
                               style={{ width: '100%', height: '100%' }}
                               contentFit="contain"
                               cachePolicy="memory-disk"
-                              placeholder={it.blurhash ? { blurhash: it.blurhash } : undefined}
+                              placeholder={thumbIt ? { uri: thumbIt } : (it.blurhash ? { blurhash: it.blurhash } : undefined)}
                               placeholderContentFit="contain"
                               transition={150} />
                           ) : (

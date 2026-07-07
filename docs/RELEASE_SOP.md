@@ -67,7 +67,7 @@
 ## 4. SOP-B:OTA-only 发版(纯 JS 改动)
 
 1. **不要 bump version** —— 保持 app.json `version` = 当前 native baseline(现在 0.1.2)。OTA 静默更新 JS,版本号不变(用 updateId 区分迭代,不靠 version)。仅当你确实想让用户看到版本号跳动时才 bump,但那之后下一个 native 版必须更高(规则 A2)。
-2. `python scripts/aura_ota_publish.py --channel production` —— 默认自动从 `aura:release.runtimeVersion` 读已部署 APK 的真实指纹(当前 0.1.2 = `bfd6b59dc68828ec57f210c3a2d9e27a17499fdf`),不用手动传。只有要发到**别的**指纹时才加 `--runtime-version`。(脚本里 `read_deployed_runtime_version()` 接管了原来手动读 `assets/fingerprint` 的步骤。)
+2. `python scripts/aura_ota_publish.py --channel production` —— 默认自动从 `aura:release.runtimeVersion` 读已部署 APK 的真实指纹(线上当前值以 KV aura:release 为准，别信文档快照),不用手动传。只有要发到**别的**指纹时才加 `--runtime-version`。(脚本里 `read_aura_release()` 接管了原来手动读 `assets/fingerprint` 的步骤。)
 4. **不要碰 `aura:release`**(那是 APK 通道)。
 5. 验证 manifest endpoint 返回新 updateId + 新 version。
 

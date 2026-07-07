@@ -21,6 +21,9 @@ export type Position = {
 export type ImageSource = {
   id?: string;                       // library item id — matches async full-image upgrades
   uri: string;                       // full-resolution URL
+  preview?: boolean;                 // uri is still the thumbnail; the real full-res
+                                     // is in transit over the relay (drives the
+                                     // "原图传输中" pill until the swap lands)
   tags?: string[];                   // descriptors carried into the share sheet (work tags / author)
   dimensions: Dimensions | null;     // intrinsic full image size
   thumbUri: string;                  // thumbnail URL used as placeholder

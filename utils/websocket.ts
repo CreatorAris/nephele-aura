@@ -1,4 +1,4 @@
-import { getToken, isTokenExpired } from './auth';
+import { getToken, isTokenExpired, refreshAccessToken } from './auth';
 import analytics from './analytics';
 
 const RELAY_URL = 'wss://ws.arisfusion.com/ws';
@@ -47,6 +47,19 @@ export class RemoteWebSocket {
   // "ping" (setWebSocketAutoResponse) so this never wakes it or reaches desktop.
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private static readonly PING_INTERVAL_MS = 25000;
+  // Last "pong" arrival. A half-open socket (NAT/edge reaped, no FIN/RST —
+  // the picker/share backgrounding case) keeps readyState OPEN for minutes,
+  // so state stays 'connected' and send() writes into the void instead of
+  // queueing. Two missed pongs → force-close so onclose runs the normal
+  // reconnect + the pending queue takes over.
+  private lastPongAt = 0;
+  // Commands issued while the socket is down — e.g. the system photo picker
+  // backgrounds the app, dropping the relay connection, and the import fires the
+  // instant we return (upload lands over LAN, but the socket hasn't reopened
+  // yet). Queue them here and flush on reconnect; otherwise send() silently
+  // drops them and the desktop is never told to import what was just uploaded.
+  private pendingCommands: RemoteMessage[] = [];
+  private static readonly MAX_PENDING = 50;
 
   /**
    * Connect to CF Durable Object relay
@@ -67,8 +80,14 @@ export class RemoteWebSocket {
       return;
     }
 
-    // Preflight: catch expired tokens before the server has to 401 us
+    // Preflight: catch expired tokens before the server has to 401 us.
+    // A 30d access-token expiry is routine while the 90d refresh token still
+    // works — rotate first; only a refused/absent rotation is a real logout.
     if (isTokenExpired(token)) {
+      if (await refreshAccessToken()) {
+        this.setState('disconnected');  // release the 'connecting' claim for the re-entry guard
+        return this.connect();          // single re-run with the fresh token
+      }
       console.log('[WS] Token expired locally, redirecting to login');
       this.setState('disconnected');
       this.handleAuthInvalid();
@@ -95,6 +114,11 @@ export class RemoteWebSocket {
         this.setDesktopOnline(false);
         if (this.desktopProbeTimer) clearTimeout(this.desktopProbeTimer);
         try { this.requestStatus(); } catch { /* swallow */ }
+        // pendingCommands are NOT flushed here: with the desktop absent the
+        // relay forwards them into an empty room and they're gone (the exact
+        // loss the queue exists to prevent). setDesktopOnline(true) flushes —
+        // proof a desktop socket is in the room (room_state / device_connected
+        // / status reply), which lands right after open when it's there.
         this.desktopProbeTimer = setTimeout(() => {
           this.desktopProbeTimer = null;
           if (!this.desktopOnline) {
@@ -104,8 +128,9 @@ export class RemoteWebSocket {
       };
 
       this.ws.onmessage = (event) => {
-        // Heartbeat ack from the relay's auto-responder — not JSON, just skip it.
-        if (event.data === 'pong') return;
+        // Heartbeat ack from the relay's auto-responder — not JSON, but it is
+        // liveness proof for the pong deadline. Record, then skip.
+        if (event.data === 'pong') { this.lastPongAt = Date.now(); return; }
         try {
           const msg: RemoteMessage = JSON.parse(event.data as string);
           // Relay-level peer notifications (defined in CF Worker RemoteRelay).
@@ -115,6 +140,12 @@ export class RemoteWebSocket {
           } else if (msg.type === 'event' && msg.action === 'device_disconnected') {
             const dev = (msg.data as { device?: string } | undefined)?.device;
             if (dev === 'desktop') this.setDesktopOnline(false);
+          } else if (msg.type === 'event' && msg.action === 'room_state') {
+            // Relay snapshot sent to US on connect — the authoritative answer
+            // to "is the desktop already in the room", beating the 3s status
+            // probe (which stays as fallback for relays predating room_state).
+            const peers = (msg.data as { peers?: { device?: string }[] } | undefined)?.peers || [];
+            if (peers.some(p => p.device === 'desktop')) this.setDesktopOnline(true);
           } else if (msg.type === 'status') {
             // Any status payload from desktop bridge implicitly proves it's alive.
             this.setDesktopOnline(true);
@@ -131,6 +162,7 @@ export class RemoteWebSocket {
         const reasonKind =
           (closeReason.includes('401') || closeReason.includes('403')
             || closeReason.toLowerCase().includes('unauthorized')) ? 'auth' :
+          closeReason.toLowerCase().includes('revoked') ? 'revoked' :
           (event.code === 1000 && closeReason.toLowerCase().includes('replaced')) ? 'replaced' :
           event.code === 1006 ? 'abnormal' :
           'normal';
@@ -150,6 +182,14 @@ export class RemoteWebSocket {
         const reason = String(event.reason || '');
         if (reason.includes('401') || reason.includes('403')
             || reason.toLowerCase().includes('unauthorized')) {
+          this.handleAuthInvalid();
+          return;
+        }
+        // Desktop unpaired this device (session manager 解除配对/断开连接).
+        // Token is dead (or about to be) — treat like an auth invalidation so
+        // the app clears credentials instead of fighting the relay forever.
+        if (reason.toLowerCase().includes('revoked')) {
+          console.log('[WS] Unpaired by desktop — clearing session');
           this.handleAuthInvalid();
           return;
         }
@@ -184,10 +224,18 @@ export class RemoteWebSocket {
   // it resets NAT / CF edge idle timers so the socket isn't reaped.
   private startPing(): void {
     this.stopPing();
+    this.lastPongAt = Date.now();
     this.pingTimer = setInterval(() => {
-      if (this.state === 'connected' && this.ws) {
-        try { this.ws.send('ping'); } catch { /* socket dying; onclose will handle */ }
+      if (this.state !== 'connected' || !this.ws) return;
+      // Deadline check BEFORE sending: 2 missed pongs (plus slack) means the
+      // socket is half-open — close it so the real reconnect path runs.
+      if (Date.now() - this.lastPongAt > RemoteWebSocket.PING_INTERVAL_MS * 2 + 10_000) {
+        console.log('[WS] pong deadline missed — closing half-open socket');
+        analytics.capture('relay_pong_deadline_missed');
+        try { this.ws.close(); } catch { /* already dead */ }
+        return;
       }
+      try { this.ws.send('ping'); } catch { /* socket dying; onclose will handle */ }
     }, RemoteWebSocket.PING_INTERVAL_MS);
   }
 
@@ -198,8 +246,21 @@ export class RemoteWebSocket {
     }
   }
 
+  // Replay commands queued while disconnected. Called when the desktop is
+  // confirmed present in the room (setDesktopOnline(true)) — never on bare
+  // socket open, where a missing desktop would swallow the whole queue.
+  private flushPending(): void {
+    if (!this.pendingCommands.length || !this.ws || this.state !== 'connected') return;
+    const queued = this.pendingCommands;
+    this.pendingCommands = [];
+    for (const m of queued) {
+      try { this.ws.send(JSON.stringify(m)); } catch { /* socket dying; onclose handles */ }
+    }
+  }
+
   private handleAuthInvalid(): void {
     this.authInvalid = true;
+    this.pendingCommands = [];   // don't replay a prior session's commands after re-login
     this.stopPing();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -244,6 +305,7 @@ export class RemoteWebSocket {
     this.desktopOnline = online;
     analytics.capture('desktop_presence_changed', { online });
     if (!online) this.setTransport(null);   // transport unknown once desktop drops
+    if (online) this.flushPending();        // desktop provably in the room → safe to replay
     this.desktopListeners.forEach(fn => {
       try { fn(online); } catch (e) { console.warn('[WS] desktop listener err', e); }
     });
@@ -275,8 +337,17 @@ export class RemoteWebSocket {
   /**
    * Send a command to desktop
    */
-  send(msg: RemoteMessage): boolean {
-    if (this.state !== 'connected' || !this.ws) return false;
+  send(msg: RemoteMessage, opts?: { queueIfOffline?: boolean }): boolean {
+    if (this.state !== 'connected' || !this.ws) {
+      if (opts?.queueIfOffline) {
+        this.pendingCommands.push(msg);
+        if (this.pendingCommands.length > RemoteWebSocket.MAX_PENDING) {
+          this.pendingCommands.shift();
+        }
+        return true;
+      }
+      return false;
+    }
     this.ws.send(JSON.stringify(msg));
     return true;
   }
@@ -531,7 +602,7 @@ export class RemoteWebSocket {
         // outcome to this request (and other listeners can ignore it).
         requestId: options?.requestId || '',
       },
-    });
+    }, { queueIfOffline: true });  // survive the picker-backgrounded reconnect
   }
 
   /**
@@ -558,10 +629,12 @@ export class RemoteWebSocket {
    * Upload a local image file to R2 relay and return the CDN URL.
    * Used for phone gallery → desktop transfer.
    */
-  static async uploadImage(localUri: string, mime: string = 'image/jpeg'): Promise<string> {
+  static async uploadImage(localUri: string, mime: string = 'image/jpeg', key?: string): Promise<string> {
     const ext = mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : 'jpg';
-    const key = `remote_${Date.now().toString(36)}.${ext}`;
-    const url = `https://files.arisfusion.com/upload/${key}`;
+    // Caller-supplied key keeps concurrent uploads from colliding on the same
+    // millisecond timestamp.
+    const k = key || `remote_${Date.now().toString(36)}.${ext}`;
+    const url = `https://files.arisfusion.com/upload/${k}`;
 
     const resp = await fetch(localUri);
     const blob = await resp.blob();
@@ -586,10 +659,43 @@ export class RemoteWebSocket {
   }
 
   /**
+   * Upload a local image straight to the desktop's LAN file server, returning a
+   * `local:{key}` ref the desktop imports without any cloud round trip. Used on
+   * the same-LAN / Tailscale fast path; callers fall back to `uploadImage` (R2)
+   * when this throws or no LAN server has been discovered. `uploadToken` is the
+   * desktop-minted bearer announced over the (authenticated) relay channel.
+   */
+  static async uploadImageLAN(
+    localUri: string,
+    mime: string,
+    lanUrl: string,
+    uploadToken: string,
+    key: string,
+  ): Promise<string> {
+    const resp = await fetch(localUri);
+    const blob = await resp.blob();
+
+    const uploadResp = await fetch(`${lanUrl}/import/${key}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': mime, Authorization: `Bearer ${uploadToken}` },
+      body: blob,
+    });
+
+    if (!uploadResp.ok) {
+      throw new Error(`LAN upload failed: ${uploadResp.status}`);
+    }
+
+    const result = await uploadResp.json() as { ref?: string };
+    if (!result.ref) throw new Error('No ref in LAN upload response');
+    return result.ref;
+  }
+
+  /**
    * Disconnect
    */
   disconnect(): void {
     this.stopPing();
+    this.pendingCommands = [];  // deliberate teardown — never replay across sessions
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;

@@ -140,6 +140,10 @@ export default function ProfileScreen() {
   };
 
   const doLogout = async () => {
+    // Tear the socket down first: it drops the pending-command queue and
+    // stops the reconnect loop, so nothing from this session can replay
+    // into the next account's relay room after a re-pair.
+    remoteWS.disconnect();
     await logout();
     setLoggedIn(false);
     setUser(null);

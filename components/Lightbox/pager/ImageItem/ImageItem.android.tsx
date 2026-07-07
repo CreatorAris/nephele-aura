@@ -10,7 +10,7 @@
 //     swipe) are ported verbatim — this is the production-quality core that
 //     makes the hero animation feel right.
 
-import { memo, useState } from 'react';
+import { memo, useRef, useState } from 'react';
 import { ActivityIndicator, StyleSheet } from 'react-native';
 import {
   Gesture,
@@ -29,6 +29,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { Image } from 'expo-image';
 
+import analytics from '../../../../utils/analytics';
 import {
   type Dimensions as ImageDimensions,
   type ImageSource,
@@ -314,6 +315,19 @@ function ImageItemInner({
 
   const [showLoader, setShowLoader] = useState(false);
   const [hasLoaded, setHasLoaded] = useState(false);
+  // Load-start timestamp — onLoad delta gives per-host download+decode time
+  // for the CF vs CN relay A/B (event lightbox_image_loaded).
+  const mountedAt = useRef(Date.now());
+  // The full-res swap arrives as a uri PROP UPDATE (the pager keys pages by
+  // position so PagerView never sees a remount). Reset the per-uri load
+  // state in render so the loader shows for the new source and onLoad/the
+  // timing probe fire for it.
+  const lastUriRef = useRef(imageSrc.uri);
+  if (lastUriRef.current !== imageSrc.uri) {
+    lastUriRef.current = imageSrc.uri;
+    mountedAt.current = Date.now();
+    if (hasLoaded) setHasLoaded(false);
+  }
   useAnimatedReaction(
     () => transforms.get().isResting && !hasLoaded,
     (show, prevShow) => {
@@ -337,6 +351,10 @@ function ImageItemInner({
             <Animated.View style={imageStyle}>
               <Image
                 contentFit="contain"
+                // Decode at full resolution — default downscales the bitmap to
+                // the view size, so pinch-zoom magnified a screen-res copy and
+                // large images looked blurry even though /full is the original.
+                allowDownscaling={false}
                 source={{ uri: imageSrc.uri }}
                 placeholderContentFit="contain"
                 placeholder={{ uri: imageSrc.thumbUri }}
@@ -345,9 +363,26 @@ function ImageItemInner({
                     ? undefined
                     : e => {
                         setHasLoaded(true);
+                        if (imageSrc.uri?.startsWith('http')) {
+                          analytics.capture('lightbox_image_loaded', {
+                            ms: Date.now() - mountedAt.current,
+                            host: imageSrc.uri.split('/')[2] ?? '',
+                          });
+                        }
                         onLoad({ width: e.source.width, height: e.source.height });
                       }
                 }
+                onError={e => {
+                  console.warn(
+                    '[Lightbox] image load failed:',
+                    imageSrc.uri?.slice(0, 90),
+                    e?.error,
+                  );
+                  analytics.capture('lightbox_image_error', {
+                    error: String(e?.error ?? '').slice(0, 120),
+                    uri_kind: imageSrc.uri?.startsWith('data:') ? 'data' : imageSrc.uri?.split('/')[2] ?? '',
+                  });
+                }}
                 style={{ flex: 1 }}
                 cachePolicy="memory"
               />
