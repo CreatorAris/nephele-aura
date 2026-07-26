@@ -1,7 +1,18 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
 import { getToken, isTokenExpired, refreshAccessToken } from './auth';
 import analytics from './analytics';
 
+// Two ways into the same Worker relay. The global host shares the Cloudflare
+// IP pair that China Telecom blackholed for four days in 2026-07, which left
+// paired phones on those lines unable to connect at all; the CN host is the
+// mainland relay box proxying /ws onward. Whichever one connects is
+// remembered, so a phone in a blocked region doesn't burn a TCP timeout on
+// every cold start.
 const RELAY_URL = 'wss://ws.arisfusion.com/ws';
+const RELAY_URL_CN = 'wss://relay.creatoraris.com/ws';
+const RELAY_URLS = [RELAY_URL, RELAY_URL_CN] as const;
+const RELAY_PREF_KEY = 'nephele_relay_url';
 
 export type RemoteMessage = {
   type: 'command' | 'query' | 'event' | 'status';
@@ -40,6 +51,16 @@ export class RemoteWebSocket {
   private transport: TransportMode = null;
   private transportListeners: Set<TransportListener> = new Set();
   private desktopProbeTimer: ReturnType<typeof setTimeout> | null = null;
+  // Relay endpoint rotation. `relayIndex` advances only on a failed attempt,
+  // so a working endpoint keeps being used; `relayPrefLoaded` makes the very
+  // first connect wait for the remembered choice instead of racing it.
+  private relayIndex = 0;
+  private relayPrefLoaded = false;
+  private relayPrefWritten = '';
+  // Set at onopen, cleared when an attempt starts. Distinguishes "this
+  // endpoint never came up" (rotate to the other one) from "a working
+  // connection dropped later" (keep the endpoint, just reconnect).
+  private openedThisAttempt = false;
   // App-level heartbeat. RN's WebSocket can't send protocol ping frames, and
   // neither CF's edge nor mobile NAT will hold an idle socket open — without
   // this, the connection silently dies (abnormal 1006) every ~30-100s and we
@@ -96,13 +117,19 @@ export class RemoteWebSocket {
 
     this.authInvalid = false;
 
+    await this.loadRelayPreference();
+    const relayUrl = RELAY_URLS[this.relayIndex % RELAY_URLS.length];
+    this.openedThisAttempt = false;
+
     try {
-      this.ws = new WebSocket(`${RELAY_URL}?token=${token}&device=mobile`);
+      this.ws = new WebSocket(`${relayUrl}?token=${token}&device=mobile`);
 
       this.ws.onopen = () => {
-        console.log('[WS] Connected to relay');
+        console.log(`[WS] Connected to relay (${relayUrl === RELAY_URL ? 'global' : 'cn'})`);
         this.setState('connected');
-        analytics.capture('relay_connected');
+        this.openedThisAttempt = true;
+        void this.rememberRelay(relayUrl);
+        analytics.capture('relay_connected', { endpoint: relayUrl === RELAY_URL ? 'global' : 'cn' });
         void analytics.flush();   // surface flap timing promptly, don't wait 15s
         this.reconnectDelay = 3000; // reset backoff
         this.startPing();
@@ -733,8 +760,45 @@ export class RemoteWebSocket {
     this.stateListeners.forEach(fn => fn(state));
   }
 
+  /**
+   * Remember the endpoint that just connected, so the next cold start goes
+   * straight to it. Best-effort: a storage failure only costs one wasted
+   * attempt later.
+   */
+  private async rememberRelay(url: string): Promise<void> {
+    if (url === this.relayPrefWritten) return;  // reconnects shouldn't rewrite it
+    try {
+      await AsyncStorage.setItem(RELAY_PREF_KEY, url);
+      this.relayPrefWritten = url;
+    } catch (e) {
+      console.log('[WS] Relay preference not saved:', e);
+    }
+  }
+
+  /** Start from the endpoint that worked last time (once per app run). */
+  private async loadRelayPreference(): Promise<void> {
+    if (this.relayPrefLoaded) return;
+    this.relayPrefLoaded = true;
+    try {
+      const saved = await AsyncStorage.getItem(RELAY_PREF_KEY);
+      const idx = saved ? RELAY_URLS.indexOf(saved as (typeof RELAY_URLS)[number]) : -1;
+      if (idx >= 0) {
+        this.relayIndex = idx;
+        this.relayPrefWritten = RELAY_URLS[idx];
+      }
+    } catch {
+      // Keep the default order.
+    }
+  }
+
   private scheduleReconnect(): void {
     if (this.authInvalid || this.reconnectTimer) return;
+    // The endpoint never came up — try the other one next. A drop after a
+    // successful open is a network blip, not a dead host, so stay put.
+    if (!this.openedThisAttempt) {
+      this.relayIndex = (this.relayIndex + 1) % RELAY_URLS.length;
+      console.log(`[WS] Endpoint unreachable, next attempt via ${RELAY_URLS[this.relayIndex] === RELAY_URL ? 'global' : 'cn'}`);
+    }
     console.log(`[WS] Reconnecting in ${this.reconnectDelay}ms...`);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
