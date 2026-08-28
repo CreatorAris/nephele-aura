@@ -1,6 +1,7 @@
 import {
   Pressable, Dimensions, Modal, ScrollView, FlatList,
   BackHandler, Platform, StyleSheet, Alert, View, Keyboard, Linking,
+  useWindowDimensions,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { FlashList, type FlashListProps } from '@shopify/flash-list';
@@ -15,8 +16,10 @@ import {
   Image as ImageIcon, Star, Tag, Trash2, CircleCheck,
   SlidersHorizontal, Link2, Plus, Camera, Sparkles,
   CloudOff, RotateCw, Ruler, HardDrive, FileText, ChevronRight,
+  Grid2x2, Grid3x3,
   type LucideIcon,
 } from 'lucide-react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { useState, useEffect, useCallback, useMemo, useRef, memo } from 'react';
 import { useFocusEffect } from 'expo-router';
 import Animated, {
@@ -80,11 +83,21 @@ const SCREEN_W = Dimensions.get('window').width;
 const SCREEN_H = Dimensions.get('window').height;
 const GAP = 6;
 const PAD = 6;
-const COL_W = (SCREEN_W - PAD * 2 - GAP) / 2;
+// Column width from the LIVE window width (useWindowDimensions), not the
+// module-load Dimensions snapshot — the old COL_W constant was wrong after
+// rotation / tablet split-screen. Formula keeps the 2-column result identical
+// to the old constant.
+const colWidthFor = (cols: number, winW: number) => (winW - PAD * 2 - GAP * (cols - 1)) / cols;
+// 竖屏可见密度可切 2⇄3 列（2026-08-28 反馈「竖屏可观看数目较少」），持久化。
+const GRID_COLS_KEY = 'library.gridCols';
 const PAGE_SIZE = 40;
 // Re-request a visible WAN thumb if it hasn't arrived within this window — a
 // lost response (relay flap / dropped base64) must not blank a cell forever.
 const THUMB_RETRY_MS = 6000;
+// WAN thumbs: also request this many items PAST the last visible one, so a
+// normal scroll pace lands on cells whose thumb is already in flight instead
+// of "blank until 50% visible" (2026-08-28 反馈「加载时间影响阅读流畅性」).
+const PREFETCH_AHEAD = 24;
 
 // Collapsing-header geometry (px). Search row = field 44 + pad 14 + 12.
 const SEARCH_ROW_H = 70;
@@ -125,6 +138,24 @@ export default function GalleryScreen() {
   // id → last-request timestamp (NOT a permanent blacklist — see requestMissingThumbs)
   const thumbRequested = useRef<Map<string, number>>(new Map());
   const visibleIds = useRef<Set<string>>(new Set());
+  // Last visible index — anchor for the WAN thumb ahead-prefetch window.
+  const maxVisibleIdx = useRef(0);
+  // 网格密度 2⇄3 列，持久化；列宽随实时窗宽算（转屏/分屏正确）。
+  const { width: winW } = useWindowDimensions();
+  const [gridCols, setGridCols] = useState(2);
+  useEffect(() => {
+    AsyncStorage.getItem(GRID_COLS_KEY)
+      .then(v => { if (v === '3') setGridCols(3); })
+      .catch(() => {});
+  }, []);
+  const toggleGridCols = useCallback(() => {
+    setGridCols(c => {
+      const next = c === 2 ? 3 : 2;
+      AsyncStorage.setItem(GRID_COLS_KEY, String(next)).catch(() => {});
+      return next;
+    });
+  }, []);
+  const colW = colWidthFor(gridCols, winW);
   const [detailItem, setDetailItem] = useState<LibraryItem | null>(null);
   // Delete confirm is hoisted out of DetailModal: an AuraDialog nested inside
   // DetailModal's <Modal> is the Android two-modal touch footgun. Held here, it
@@ -994,25 +1025,37 @@ export default function GalleryScreen() {
   const requestMissingThumbs = useCallback(() => {
     if (fileServerUrl) return; // LAN serves thumbs directly by URL, no request needed
     const now = Date.now();
-    for (const id of visibleIds.current) {
-      if (thumbsRef.current[id]) continue;                        // already have it
+    const ask = (id: string) => {
+      if (thumbsRef.current[id]) return;                        // already have it
       const last = thumbRequested.current.get(id);
-      if (last != null && now - last < THUMB_RETRY_MS) continue;  // in flight / recently tried
+      if (last != null && now - last < THUMB_RETRY_MS) return;  // in flight / recently tried
       thumbRequested.current.set(id, now);
       remoteWS.requestThumbnail(id);
-    }
+    };
+    for (const id of visibleIds.current) ask(id);
+    // Ahead-prefetch: the next PREFETCH_AHEAD items past the viewport start
+    // loading before they scroll in, so normal scrolling doesn't read as
+    // "blank cell → pop". Retry bookkeeping in ask() dedupes re-entry.
+    const from = maxVisibleIdx.current + 1;
+    for (const it of itemsRef.current.slice(from, from + PREFETCH_AHEAD)) ask(it.id);
   }, [fileServerUrl]);
 
   const onViewableItemsChanged = useCallback(
-    ({ viewableItems }: { viewableItems: { item: LibraryItem }[] }) => {
+    ({ viewableItems }: { viewableItems: { item: LibraryItem; index: number | null }[] }) => {
       visibleIds.current = new Set(
         viewableItems.map(v => v.item?.id).filter((id): id is string => !!id)
+      );
+      maxVisibleIdx.current = viewableItems.reduce(
+        (mx, v) => (v.index != null && v.index > mx ? v.index : mx), 0
       );
       requestMissingThumbs();
     },
     [requestMissingThumbs]
   );
-  const viewabilityConfig = useRef({ itemVisiblePercentThreshold: 50 }).current;
+  // 20% (was 50%): start the WAN thumb request as soon as a sliver of the cell
+  // shows — waiting for half the cell meant the user was already looking at a
+  // blank card before the request even left the phone.
+  const viewabilityConfig = useRef({ itemVisiblePercentThreshold: 20 }).current;
 
   // Self-heal: periodically retry visible thumbs whose response never arrived.
   // Without it a single dropped reply leaves the cell blank until next search.
@@ -1254,6 +1297,7 @@ export default function GalleryScreen() {
       <MemoCell
         item={item}
         thumb={thumbUrl}
+        colW={colW}
         onThumbError={onThumbError}
         selectMode={selectMode}
         selected={selectedIds.has(item.id)}
@@ -1278,7 +1322,7 @@ export default function GalleryScreen() {
   // thumbsVersion is included so WAN base64 arrivals trigger a re-render of
   // cells (otherwise they'd be stuck on placeholder until another state change).
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fileServerUrl, selectMode, selectedIds, toggleSelected, enterSelectMode, thumbsVersion, onThumbError]);
+  }, [fileServerUrl, selectMode, selectedIds, toggleSelected, enterSelectMode, thumbsVersion, onThumbError, colW]);
 
   // Rendered on EVERY return path (offline screens included): the in-app
   // picker was built to survive connection loss, so a transient relay flap
@@ -1509,6 +1553,13 @@ export default function GalleryScreen() {
             </Pressable>
           )}
         </ScrollView>
+        {/* 网格密度切换——图标显示点按后的目标密度 */}
+        <Pressable onPress={toggleGridCols} hitSlop={8}
+          style={({ pressed }) => ({ opacity: pressed ? 0.6 : 1 })}>
+          {gridCols === 2
+            ? <Grid3x3 size={17} color={colors.text.tertiary} />
+            : <Grid2x2 size={17} color={colors.text.tertiary} />}
+        </Pressable>
         {totalItems > 0 && (
           <Text fontSize={12} fontWeight="500" color={colors.text.tertiary}>{totalItems.toLocaleString()} 项</Text>
         )}
@@ -1533,10 +1584,17 @@ export default function GalleryScreen() {
         <SkeletonGrid topPad={listTopPad} />
       ) : (
         <AnimatedFlashList
+          // Remount on density change: FlashList's masonry layout engine keeps
+          // per-cell arrangement state that a live numColumns flip corrupts.
+          key={`cols-${gridCols}`}
           data={items}
-          numColumns={2}
+          numColumns={gridCols}
           masonry
           optimizeItemArrangement
+          // Mount cells ~1.5 screens ahead (default 250px): LAN thumbs load by
+          // URL when the cell mounts, so a bigger draw window = images ready
+          // before they scroll in (2026-08-28 反馈「加载时间影响阅读流畅性」).
+          drawDistance={Math.round(SCREEN_H * 1.5)}
           renderItem={renderCell}
           // Without keyExtractor, FlashList falls back to index as the React
           // key. Index keys break when items grows (loadMore append), causing
@@ -2028,14 +2086,14 @@ function TagPickerSheet({ visible, tags, activeTags, onToggle,
 
 // --- Grid Cell (memo + thumb via ref to avoid re-render cascade) ---
 
-function CellInner({ item, thumb, selectMode, selected, onPress, onLongPress, onThumbError }: {
-  item: LibraryItem; thumb?: string;
+function CellInner({ item, thumb, colW, selectMode, selected, onPress, onLongPress, onThumbError }: {
+  item: LibraryItem; thumb?: string; colW: number;
   selectMode: boolean; selected: boolean;
   onPress: () => void; onLongPress: () => void;
   onThumbError?: (id: string) => void;
 }) {
   const ar = item.width && item.height ? item.width / item.height : 1;
-  const h = Math.min(COL_W / ar, COL_W * 2.5);
+  const h = Math.min(colW / ar, colW * 2.5);
   // Only http(s) thumbs get a cacheKey. Relay thumbs arrive as per-session
   // base64 data URIs — no stable identity, and not necessarily the same
   // resolution /thumb serves, so they must not share a key with it.
