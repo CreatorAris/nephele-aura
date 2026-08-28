@@ -37,6 +37,7 @@ import { useLightbox, useLightboxControls, type ImageSource as LbImageSource } f
 import { colors } from '../../theme/colors';
 import { TAB_BAR_CLEARANCE } from '../../components/FloatingTabBar';
 import { uploadBus } from '../../utils/uploadBus';
+import { setOtaHold } from '../../utils/otaGuard';
 import { AuraActionSheet } from '../../components/AuraActionSheet';
 import { GalleryPicker, type PickedAsset } from '../../components/GalleryPicker';
 import { AuraDialog } from '../../components/AuraDialog';
@@ -209,6 +210,16 @@ export default function GalleryScreen() {
     | { stage: 'done'; success: boolean; tagged: number; skipped: number; failed: number; total: number };
   const [autoTagState, setAutoTagState] = useState<AutoTagState>({ stage: 'idle' });
   const autoTagReqRef = useRef('');
+  // A background/launch OTA reload mid-import kills the upload loop and the
+  // desktop round-trip — hold the apply while either flow is live.
+  useEffect(() => {
+    setOtaHold('import', importState.stage === 'uploading' || importState.stage === 'importing');
+    return () => setOtaHold('import', false);
+  }, [importState.stage]);
+  useEffect(() => {
+    setOtaHold('autotag', autoTagState.stage === 'running');
+    return () => setOtaHold('autotag', false);
+  }, [autoTagState.stage]);
   const [importSheetVisible, setImportSheetVisible] = useState(false);
   const [galleryVisible, setGalleryVisible] = useState(false);
 

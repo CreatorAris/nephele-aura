@@ -12,6 +12,7 @@ import {
 } from '../utils/updater';
 import { OTA_TRIGGER_EVENT } from '../utils/push';
 import { getUserInfo } from '../utils/auth';
+import { otaHeld } from '../utils/otaGuard';
 import analytics from '../utils/analytics';
 
 // The developer's own accounts. OTA bundles are pushed to every device, but
@@ -28,13 +29,28 @@ const DEV_UIDS = new Set([
 // Invisible gate mounted at the app root.
 //   OTA (L1, JS bundle):
 //     - every device: launch + foreground + push silently fetch & stage the
-//       bundle → applies on the next cold start. NO prompt (纯无感).
+//       bundle. NO prompt (纯无感). It then APPLIES itself at the first moment
+//       nobody is looking:
+//         · launch catch-up — a fetch that lands within the first seconds of
+//           a cold start reloads immediately, so a fresh install / long-dead
+//           relaunch runs TODAY's code in its first session, not the bundle
+//           baked into a months-old APK;
+//         · background apply — the moment the app is backgrounded, a staged
+//           bundle reloads out of sight. Android users background constantly
+//           but cold-start rarely; waiting for a cold start left them weeks
+//           behind. Both paths defer while an import/auto-tag holds otaGuard.
 //     - the dev device (DEV_UID) additionally pops an instant "立即重载" prompt
 //       on a push, kept solely for fast iteration.
 //   APK (L2, native): checked after the OTA stage; prompts if a newer build
 //     exists. Mandatory updates suppress the cancel/scrim path so the app can't
 //     be used on a build that's been hard-cut.
 type Phase = 'idle' | 'prompt' | 'downloading';
+
+// A fetch completing later than this after mount no longer auto-reloads at
+// launch — by then the user is mid-something, and the background apply will
+// pick it up instead. Keeps slow networks (CN reaching a blocked CDN) from
+// yanking the UI a minute into a session.
+const LAUNCH_HEAL_WINDOW_MS = 8000;
 
 export function UpdateGate() {
   const [phase, setPhase] = useState<Phase>('idle');
@@ -47,6 +63,9 @@ export function UpdateGate() {
   const otaReadyRef = useRef(false);   // one is already staged — don't re-prompt/re-fetch
   const checkingRef = useRef(false);   // a check is in flight (de-dupe rapid foregrounds)
   const isDevRef = useRef(false);      // this device is logged in as the developer
+  const mountedAtRef = useRef(Date.now());  // launch-heal window anchor
+  const phaseRef = useRef<Phase>('idle');   // background apply must not abort an APK download
+  phaseRef.current = phase;
 
   useEffect(() => {
     let cancelled = false;
@@ -74,6 +93,14 @@ export function UpdateGate() {
           otaReadyRef.current = true;   // staged → applies on next cold start regardless
           analytics.capture('aura_ota_ready', { showPrompt });
           if (showPrompt) setOtaReady(true);
+          // Launch catch-up: a bundle fetched moments after a cold start
+          // reloads NOW, so this very session runs it. Past the window (or
+          // mid-import) the background apply below takes over.
+          const sinceMount = Date.now() - mountedAtRef.current;
+          if (!showPrompt && sinceMount <= LAUNCH_HEAL_WINDOW_MS && !otaHeld()) {
+            analytics.capture('aura_ota_launch_heal', { ms: sinceMount });
+            await applyOtaUpdate().catch(() => {});
+          }
         }
       } finally {
         checkingRef.current = false;
@@ -95,8 +122,22 @@ export function UpdateGate() {
 
     // Re-check when the app comes back to the foreground (switch desktop→phone
     // after publishing an OTA → it's picked up without a restart).
+    // Background apply: the moment the user looks away, a staged bundle
+    // reloads — they come back to the new version with zero visible churn.
+    // Skipped while an import/auto-tag is in flight (otaGuard) or the APK
+    // downloader is running; those staged bundles land on a later background
+    // or the next cold start, same as before.
     const sub = AppState.addEventListener('change', (s) => {
       if (s === 'active') void runOta(false);   // foreground — silent stage
+      if (
+        s === 'background' &&
+        otaReadyRef.current &&
+        !otaHeld() &&
+        phaseRef.current !== 'downloading'
+      ) {
+        analytics.capture('aura_ota_bg_apply', {});
+        void applyOtaUpdate().catch(() => {});
+      }
     });
     // Push-driven: the server broadcasts a silent OTA-trigger after publishing,
     // so every running app pulls the bundle immediately (no polling). Only the
