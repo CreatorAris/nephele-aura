@@ -46,6 +46,20 @@
 
   **规则 B1:指纹的唯一可信来源 = 从「已编译的 APK」里读 `assets/fingerprint`。** 注册 `aura:release.runtimeVersion`、发 OTA 的 `--runtime-version`,都用这个值,**绝不用 resolver 的输出**。
 
+  **规则 B2:同一发版重打 APK 也会漂移指纹,靠 `legacyRuntimeVersions` 兜住,不要追求指纹复现。**
+  2026-08-29 实证:0.1.4 原地重打(同 gradle 值、无 native 改动)出来 `0777849c` ≠ 装机 `2e05209a`——`android/` 整个在 .gitignore 里(prebuild 产物),七月构建机的目录状态不可复现,追根因是死路。解法在发布侧:`aura:release` 里维护 `legacyRuntimeVersions: [...]`,`aura_ota_publish.py` 默认把同一份 bundle 发到 **primary + 全部 legacy 指纹**(同 updateId,各自的 R2 前缀 + KV 键;Worker 端按客户端上报的指纹取 KV,零改动)。装机群体换代干净后手动清掉旧指纹即可。
+
+  **规则 B3:`android/` 不入库 → build 前必须核对 `android/app/build.gradle` 的 versionCode/versionName 与已部署 APK 一致**(`aapt dump badging` 老包对照)。七月 0.1.4 的 bump 就是这样"丢"的——它根本进不了 git。
+
+### 同版本 APK 刷新(refresh embed,不 bump 版本)
+新装用户首个 session 跑的是 APK 内嵌 bundle;隔几个月不刷新,新用户第一印象就是老版本。刷新流程(2026-08-29 首跑):
+1. 核对 gradle 版本值(规则 B3)→ `gradlew assembleRelease` → aapt 验 version、`unzip -p` 读新指纹。
+2. **不 bump version**(bump 会给全量存量用户弹 APK 升级框,纯 JS 内容毫无必要)。
+3. `aura:release`:`runtimeVersion` ← 新指纹,旧指纹**追加进 `legacyRuntimeVersions`**;version/apkUrl 不动。
+4. R2 **原地覆盖**同名 apk 对象(APK 的 Cache-Control 是 no-cache,CF 边缘即时生效)→ 重下验 sha256。
+5. `python tools/oss_dl_mirror.py --channel aura` + **手动对 apk 单文件发 RefreshObjectCaches**(镜像脚本内置的 refresh 只盖 `files/` 树,不盖 `aura/releases/`)→ 验 dl.creatoraris.com 的 Content-Length。
+6. 发一次 OTA(现在默认双指纹),确认两个指纹的 manifest 端点都返回新 updateId。
+
 ---
 
 ## 3. SOP-A:Native 发版(如权限收紧)—— 按序执行
