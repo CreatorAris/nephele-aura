@@ -24,6 +24,7 @@ import {
 import { Image } from 'expo-image';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as MediaLibrary from 'expo-media-library';
+import { Check, ChevronDown } from 'lucide-react-native';
 
 import { colors } from '../theme/colors';
 
@@ -65,6 +66,34 @@ function dayKey(ts: number): string {
 type HeaderRow = { type: 'header'; key: string; label: string; ids: string[] };
 type PhotoRow = { type: 'photos'; key: string; assets: MediaLibrary.Asset[]; startIndex: number };
 type Row = HeaderRow | PhotoRow;
+
+// Album cover — lazily pulls the album's newest photo. One first:1 query per
+// visible row; FlatList virtualization keeps the total bounded.
+const AlbumCover = memo(function AlbumCover({ albumId, size }: {
+  albumId: string | null;   // null = the all-photos pseudo album
+  size: number;
+}) {
+  const [uri, setUri] = useState<string | null>(null);
+  useEffect(() => {
+    let active = true;
+    MediaLibrary.getAssetsAsync({
+      mediaType: MediaLibrary.MediaType.photo,
+      sortBy: [MediaLibrary.SortBy.creationTime],
+      first: 1,
+      ...(albumId ? { album: albumId } : {}),
+    })
+      .then(page => { if (active) setUri(page.assets[0]?.uri ?? null); })
+      .catch(() => {});
+    return () => { active = false; };
+  }, [albumId]);
+  return (
+    <View style={{ width: size, height: size, borderRadius: 8, overflow: 'hidden', backgroundColor: colors.bg.thumb }}>
+      {uri && (
+        <Image source={{ uri }} style={{ width: '100%', height: '100%' }} contentFit="cover" transition={0} />
+      )}
+    </View>
+  );
+});
 
 // Memoized cell: `selected` changes identity on every tap, which changes
 // renderItem's identity and re-renders every mounted row — memo() cuts that
@@ -140,6 +169,15 @@ export function GalleryPicker({
   const [busy, setBusy] = useState(false); // resolving file uris on confirm
   const [busyDone, setBusyDone] = useState(0);
   const [dragging, setDragging] = useState(false);
+  // Album browsing (2026-08-22 feedback): null = all photos. Selection is
+  // kept across album switches — confirm resolves ids through seenRef, which
+  // accumulates every asset any loaded page has shown, so ids picked in
+  // album A survive browsing into album B.
+  const [albums, setAlbums] = useState<MediaLibrary.Album[]>([]);
+  const [album, setAlbum] = useState<MediaLibrary.Album | null>(null);
+  const [albumsOpen, setAlbumsOpen] = useState(false);
+  const seenRef = useRef<Map<string, MediaLibrary.Asset>>(new Map());
+  const albumsLoadedRef = useRef(false);
 
   const cell = Math.floor(
     (Dimensions.get('window').width - GAP * (NUM_COLUMNS - 1)) / NUM_COLUMNS,
@@ -200,7 +238,9 @@ export function GalleryPicker({
         sortBy: [MediaLibrary.SortBy.creationTime],
         first: PAGE_SIZE,
         after,
+        ...(album ? { album: album.id } : {}),
       });
+      for (const a of page.assets) seenRef.current.set(a.id, a);
       setAssets(prev => (after ? [...prev, ...page.assets] : page.assets));
       setCursor(page.endCursor);
       setHasNext(page.hasNextPage);
@@ -209,11 +249,15 @@ export function GalleryPicker({
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [album]);
 
   useEffect(() => {
     if (!visible) {
       setSelected([]);
+      setAlbum(null);
+      setAlbumsOpen(false);
+      seenRef.current = new Map();
+      albumsLoadedRef.current = false;
       return;
     }
     let active = true;
@@ -232,6 +276,22 @@ export function GalleryPicker({
         setCursor(undefined);
         setHasNext(true);
         loadPage(undefined);
+        // Album list is a one-shot per open (the effect re-runs on album
+        // switch via loadPage's identity) — a stale count is fine for the
+        // session. Empty albums are dropped.
+        if (!albumsLoadedRef.current) {
+          albumsLoadedRef.current = true;
+          MediaLibrary.getAlbumsAsync({ includeSmartAlbums: true })
+            .then(all => {
+              if (!active) { albumsLoadedRef.current = false; return; }
+              setAlbums(
+                all
+                  .filter(a => (a.assetCount ?? 0) > 0)
+                  .sort((a, b) => (b.assetCount ?? 0) - (a.assetCount ?? 0)),
+              );
+            })
+            .catch(() => { albumsLoadedRef.current = false; });
+        }
       } else {
         setPerm('denied');
       }
@@ -425,9 +485,10 @@ export function GalleryPicker({
     setBusy(true);
     setBusyDone(0);
     try {
-      const byId = new Map(assets.map(a => [a.id, a]));
+      // seenRef, not the current assets array — a selection made in one album
+      // must survive the user browsing into another before confirming.
       const chosen = selected
-        .map(id => byId.get(id))
+        .map(id => seenRef.current.get(id))
         .filter(Boolean) as MediaLibrary.Asset[];
       // Batched, not one flat Promise.all — 5000-wide getAssetInfoAsync stalls
       // with zero feedback and can starve the JS thread.
@@ -453,7 +514,7 @@ export function GalleryPicker({
     } finally {
       setBusy(false);
     }
-  }, [selected, assets, busy, onConfirm]);
+  }, [selected, busy, onConfirm]);
 
   const renderItem = useCallback(
     ({ item }: { item: Row }) => {
@@ -517,7 +578,21 @@ export function GalleryPicker({
           <Pressable onPress={onClose} hitSlop={10}>
             <Text style={styles.cancel}>取消</Text>
           </Pressable>
-          <Text style={styles.title}>选择图片</Text>
+          <Pressable
+            onPress={() => setAlbumsOpen(v => !v)}
+            hitSlop={10}
+            disabled={perm !== 'granted'}
+            style={styles.titleBtn}
+          >
+            <Text style={styles.title} numberOfLines={1}>
+              {album ? album.title : '全部照片'}
+            </Text>
+            <ChevronDown
+              size={16}
+              color={colors.text.secondary}
+              style={{ transform: [{ rotate: albumsOpen ? '180deg' : '0deg' }] }}
+            />
+          </Pressable>
           <Pressable
             onPress={confirm}
             hitSlop={10}
@@ -537,6 +612,34 @@ export function GalleryPicker({
               需要相册权限才能选图。请在系统设置里开启 Nephele 的照片访问。
             </Text>
           </View>
+        ) : albumsOpen ? (
+          <FlatList
+            data={[null, ...albums] as (MediaLibrary.Album | null)[]}
+            keyExtractor={a => (a ? a.id : '__all__')}
+            renderItem={({ item }) => {
+              const current = (item?.id ?? null) === (album?.id ?? null);
+              return (
+                <Pressable
+                  style={({ pressed }) => [styles.albumRow, pressed && { opacity: 0.6 }]}
+                  onPress={() => {
+                    setAlbumsOpen(false);
+                    if (!current) setAlbum(item);
+                  }}
+                >
+                  <AlbumCover albumId={item?.id ?? null} size={52} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.albumName} numberOfLines={1}>
+                      {item ? item.title : '全部照片'}
+                    </Text>
+                    {item != null && (
+                      <Text style={styles.albumCount}>{item.assetCount} 项</Text>
+                    )}
+                  </View>
+                  {current && <Check size={18} color={colors.brand.primary} />}
+                </Pressable>
+              );
+            }}
+          />
         ) : (
           <View
             ref={wrapRef}
@@ -589,7 +692,8 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.border.hairline,
   },
-  title: { color: colors.text.primary, fontSize: 16, fontWeight: '600' },
+  title: { color: colors.text.primary, fontSize: 16, fontWeight: '600', maxWidth: 200 },
+  titleBtn: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   cancel: { color: colors.text.secondary, fontSize: 15 },
   done: { color: colors.brand.primary, fontSize: 15, fontWeight: '600' },
   doneOff: { color: colors.text.faint },
@@ -628,4 +732,13 @@ const styles = StyleSheet.create({
   badgeOn: { backgroundColor: colors.brand.primary, borderColor: colors.brand.primary },
   badgeText: { color: '#1A1438', fontSize: 12, fontWeight: '700' },
   badgeTextSmall: { fontSize: 9 },
+  albumRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
+  albumName: { color: colors.text.primary, fontSize: 15, fontWeight: '500' },
+  albumCount: { color: colors.text.tertiary, fontSize: 12, marginTop: 2 },
 });

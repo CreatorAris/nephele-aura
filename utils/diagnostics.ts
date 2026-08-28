@@ -193,11 +193,19 @@ export async function runDiagnostics(): Promise<DiagReport> {
     const transport = remoteWS.getTransport();
     const tLabel = transport === 'lan' ? '局域网直连' : transport === 'relay' ? '服务器中转' : '';
     let detail: string;
+    let hint = '';
     if (state === 'connected' && desktopOnline) detail = tLabel ? `在线 · ${tLabel}` : '在线';
-    else if (state === 'connected') detail = '桌面端离线';
+    else if (state === 'connected') {
+      // Relay reachable but no desktop in the account's room — either the
+      // desktop app isn't running, or it is and its bridge died / is on
+      // another account. Spell that out: this exact state shipped as a bare
+      // "桌面端离线" in two pairing-bug feedbacks (08-12, 08-22).
+      detail = '桌面端离线';
+      hint = '中继正常但账号下无桌面端；若电脑已打开，请确认双端登录同一账号';
+    }
     else if (state === 'connecting') detail = '连接中';
     else detail = '未连接';
-    items.push({ key: 'desktop', label: '桌面端', detail, status: 'ok', hint: '' });
+    items.push({ key: 'desktop', label: '桌面端', detail, status: 'ok', hint });
   } catch {
     /* ws read is best-effort */
   }

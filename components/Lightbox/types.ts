@@ -27,6 +27,10 @@ export type ImageSource = {
   tags?: string[];                   // descriptors carried into the share sheet (work tags / author)
   dimensions: Dimensions | null;     // intrinsic full image size
   thumbUri: string;                  // thumbnail URL used as placeholder
+  thumbCacheKey?: string;            // stable cache key for thumbUri, when its URL
+                                     // isn't stable (LAN URLs carry a random port +
+                                     // the probed local IP). Set it to whatever the
+                                     // grid used, or the placeholder misses that entry.
   thumbDimensions: Dimensions | null;
   thumbRect: MeasuredDimensions | null;        // screen-space rect at open time
   thumbRef?: AnimatedRef<Component> | null;    // ref measured in UI thread

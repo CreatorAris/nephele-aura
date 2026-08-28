@@ -17,7 +17,7 @@ import {
   CloudOff, RotateCw, Ruler, HardDrive, FileText, ChevronRight,
   type LucideIcon,
 } from 'lucide-react-native';
-import React, { useState, useEffect, useCallback, useRef, memo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef, memo } from 'react';
 import { useFocusEffect } from 'expo-router';
 import Animated, {
   type AnimatedRef, useAnimatedRef,
@@ -63,6 +63,16 @@ type LibraryItem = {
   annotation: string; url: string; size: number;
   blurhash?: string;  // optional — populated by desktop's background backfill
 };
+
+// Stable cache key for a library item's pixels. LAN image URLs embed an
+// OS-assigned port (core/file_server.py binds :0) plus whichever local address
+// won the probe — LAN or Tailscale — so the URL changes on every desktop
+// restart and every network switch. expo-image keys its cache by the full URI
+// unless told otherwise, which invalidated every cached thumbnail on each of
+// those events and made `cachePolicy="memory-disk"` effectively a no-op across
+// sessions. id + byte size survives both, and size busts the entry if the file
+// behind an id is ever replaced.
+const thumbCacheKey = (item: Pick<LibraryItem, 'id' | 'size'>) => `${item.id}:${item.size}`;
 
 // --- Constants ---
 
@@ -727,6 +737,9 @@ export default function GalleryScreen() {
           tags: it.tags,
           dimensions: dims,
           thumbUri,
+          // Must match the grid cell's key, otherwise the lightbox placeholder
+          // misses the entry the grid just cached and re-pulls the thumbnail.
+          thumbCacheKey: fileServerUrl ? thumbCacheKey(it) : undefined,
           thumbDimensions: dims,
           thumbRect: null,
           thumbRef: i === idx ? thumbRef : null,
@@ -1300,6 +1313,13 @@ export default function GalleryScreen() {
               </Text>
               <Text color={colors.text.tertiary} fontSize={13} textAlign="center" lineHeight={20}>
                 请在电脑上打开 Nephele Workshop
+              </Text>
+              {/* 2026-08-22 feedback: both ends running + same account can still
+                  land here (desktop bridge failed to start). Without this line
+                  the user's only theory is "重新连接坏了". */}
+              <Text color={colors.text.muted} fontSize={12} textAlign="center" lineHeight={18}>
+                电脑已经开着？请确认桌面端登录的是同一账号，{'\n'}
+                并在桌面端侧栏的 Aura 入口查看互联状态
               </Text>
             </YStack>
             <Pressable onPress={() => remoteWS.connect()} hitSlop={6}>
@@ -2016,6 +2036,13 @@ function CellInner({ item, thumb, selectMode, selected, onPress, onLongPress, on
 }) {
   const ar = item.width && item.height ? item.width / item.height : 1;
   const h = Math.min(COL_W / ar, COL_W * 2.5);
+  // Only http(s) thumbs get a cacheKey. Relay thumbs arrive as per-session
+  // base64 data URIs — no stable identity, and not necessarily the same
+  // resolution /thumb serves, so they must not share a key with it.
+  const thumbSource = useMemo(
+    () => (thumb?.startsWith('http') ? { uri: thumb, cacheKey: thumbCacheKey(item) } : thumb),
+    [thumb, item.id, item.size],
+  );
   return (
     <Pressable
       style={({ pressed }) => ({
@@ -2035,7 +2062,7 @@ function CellInner({ item, thumb, selectMode, selected, onPress, onLongPress, on
                 // recycling — both systems were swapping state and producing the
                 // "image loads, then disappears as I scroll" flicker. Source
                 // string + key (= item.id via keyExtractor) is enough.
-                source={thumb}
+                source={thumbSource}
                 style={{ width: '100%', height: h }}
                 contentFit="cover"
                 transition={0}

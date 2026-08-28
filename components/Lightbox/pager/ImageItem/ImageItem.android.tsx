@@ -357,7 +357,7 @@ function ImageItemInner({
                 allowDownscaling={false}
                 source={{ uri: imageSrc.uri }}
                 placeholderContentFit="contain"
-                placeholder={{ uri: imageSrc.thumbUri }}
+                placeholder={{ uri: imageSrc.thumbUri, cacheKey: imageSrc.thumbCacheKey }}
                 onLoad={
                   hasLoaded
                     ? undefined
