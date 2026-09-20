@@ -74,6 +74,23 @@ function dayKey(ts: number): string {
   return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 }
 
+// creationTime is MediaStore's raw DATE_TAKEN — whatever the app that saved the
+// file (or its EXIF) wrote, unvalidated. Real libraries carry garbage in it
+// (seen: years 4218 and 5779, and 0 = "1970"). DATE_MODIFIED comes from the
+// filesystem, so an implausible taken-date falls back to it.
+const MIN_PLAUSIBLE_TS = Date.UTC(2000, 0, 1);
+function assetTime(a: MediaLibrary.Asset): number {
+  const t = a.creationTime;
+  if (t >= MIN_PLAUSIBLE_TS && t <= Date.now() + 86400000) return t;
+  return a.modificationTime || t;
+}
+
+// The query sorts by raw DATE_TAKEN, so a misdated asset arrives out of place;
+// re-sort by effective time or its day would split into two groups (and two
+// headers with the same key).
+const byTimeDesc = (list: MediaLibrary.Asset[]) =>
+  [...list].sort((a, b) => assetTime(b) - assetTime(a));
+
 type HeaderRow = { type: 'header'; key: string; label: string; ids: string[] };
 type PhotoRow = { type: 'photos'; key: string; assets: MediaLibrary.Asset[]; startIndex: number };
 type Row = HeaderRow | PhotoRow;
@@ -203,20 +220,20 @@ export function GalleryPicker({
     return m;
   }, [selected]);
 
-  // Day-grouped rows. `assets` is already creationTime-sorted (query sort),
+  // Day-grouped rows. `assets` is kept sorted by effective time (byTimeDesc),
   // so the flat asset index doubles as the sweep order for drag-select.
   const rows = useMemo<Row[]>(() => {
     const out: Row[] = [];
     let i = 0;
     while (i < assets.length) {
-      const key = dayKey(assets[i].creationTime);
+      const key = dayKey(assetTime(assets[i]));
       const groupStart = i;
-      while (i < assets.length && dayKey(assets[i].creationTime) === key) i++;
+      while (i < assets.length && dayKey(assetTime(assets[i])) === key) i++;
       const group = assets.slice(groupStart, i);
       out.push({
         type: 'header',
         key: `h-${key}`,
-        label: dayLabel(group[0].creationTime),
+        label: dayLabel(assetTime(group[0])),
         ids: group.map(a => a.id),
       });
       for (let j = 0; j < group.length; j += cols) {
@@ -253,7 +270,7 @@ export function GalleryPicker({
         ...(album ? { album: album.id } : {}),
       });
       for (const a of page.assets) seenRef.current.set(a.id, a);
-      setAssets(prev => (after ? [...prev, ...page.assets] : page.assets));
+      setAssets(prev => byTimeDesc(after ? [...prev, ...page.assets] : page.assets));
       setCursor(page.endCursor);
       setHasNext(page.hasNextPage);
     } catch (e) {

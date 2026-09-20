@@ -6,6 +6,7 @@ import { colors } from '../theme/colors';
 import {
   checkOtaUpdate,
   applyOtaUpdate,
+  autoApplyOtaUpdate,
   checkApkUpdate,
   downloadAndInstallApk,
   type AuraRelease,
@@ -99,7 +100,7 @@ export function UpdateGate() {
           const sinceMount = Date.now() - mountedAtRef.current;
           if (!showPrompt && sinceMount <= LAUNCH_HEAL_WINDOW_MS && !otaHeld()) {
             analytics.capture('aura_ota_launch_heal', { ms: sinceMount });
-            await applyOtaUpdate().catch(() => {});
+            await autoApplyOtaUpdate().catch(() => {});
           }
         }
       } finally {
@@ -136,7 +137,7 @@ export function UpdateGate() {
         phaseRef.current !== 'downloading'
       ) {
         analytics.capture('aura_ota_bg_apply', {});
-        void applyOtaUpdate().catch(() => {});
+        void autoApplyOtaUpdate().catch(() => {});
       }
     });
     // Push-driven: the server broadcasts a silent OTA-trigger after publishing,

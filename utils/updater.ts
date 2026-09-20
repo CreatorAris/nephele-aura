@@ -13,6 +13,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as IntentLauncher from 'expo-intent-launcher';
 import { Platform } from 'react-native';
 import Constants from 'expo-constants';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const API_BASE = 'https://api.arisfusion.com';
 const CLIENT_TYPE = 'nephele-aura';
@@ -33,11 +34,33 @@ export async function checkOtaUpdate(): Promise<boolean> {
     const res = await Updates.checkForUpdateAsync();
     if (!res.isAvailable) return false;
     await Updates.fetchUpdateAsync();
+    stagedId = (res.manifest as { id?: string } | undefined)?.id ?? null;
     return true;
   } catch (e) {
     console.warn('[OTA] check failed', e);
     return false;
   }
+}
+
+// Id of the update the last checkOtaUpdate() staged; null when unknown.
+let stagedId: string | null = null;
+const AUTO_APPLIED_KEY = 'ota.autoAppliedId';
+
+/**
+ * The UNATTENDED apply (launch catch-up, background apply): at most one
+ * automatic reload per update id, remembered across launches. If a reload
+ * does not land on the staged update — 2026-09-21: an APK whose embedded
+ * manifest predated the live OTA kept relaunching into the embedded bundle —
+ * the next check reports it available again, and an unconditional reload
+ * becomes an endless loop the user cannot escape. A second attempt is left
+ * to the next cold start, which needs no reload.
+ */
+export async function autoApplyOtaUpdate(): Promise<void> {
+  if (__DEV__ || !Updates.isEnabled || !stagedId) return;
+  const last = await AsyncStorage.getItem(AUTO_APPLIED_KEY).catch(() => null);
+  if (last === stagedId) return;
+  await AsyncStorage.setItem(AUTO_APPLIED_KEY, stagedId);
+  await Updates.reloadAsync();
 }
 
 /**
