@@ -51,6 +51,12 @@
 
   **规则 B3:`android/` 不入库 → build 前必须核对 `android/app/build.gradle` 的 versionCode/versionName 与已部署 APK 一致**(`aapt dump badging` 老包对照)。七月 0.1.4 的 bump 就是这样"丢"的——它根本进不了 git。
 
+  **规则 B4:build 前必须删掉 gradle 缓存的内嵌更新资源,验包必须核 `app.manifest` 的 commitTime。**
+  2026-09-21 事故:`createReleaseUpdatesResources` 被 gradle 判 up-to-date,0.1.5 首包内嵌的 `app.manifest` + `fingerprint` 还是 **7 月 1 日**的文件——commitTime(06-30)早于线上 OTA(08-28),于是每次启动 `checkForUpdateAsync` 都判「有更新」→ fetch → launch catch-up `reloadAsync` → 重载后仍是内嵌 bundle → 死循环(用户视角 =「打开一直重新加载」;PostHog = 同一设备一分钟十几条 `aura_ota_launch_heal`)。`assets/app.config` 的 version 不走这条缓存,所以只核 version / versionCode / 签名的验包全部通过。同一份缓存还让指纹"看起来没变"(假的 `0777849c`,清缓存后真实值 `e3c41075`)。
+  build 前删这两个目录(在 `android/` 下):`app/build/generated/assets/createReleaseUpdatesResources`、`app/build/intermediates/assets/release`。
+
+  **规则 B5:换了指纹的 native 发版,旧指纹不要进 `legacyRuntimeVersions`。** `checkApkUpdate` 比的是 OTA **自报**的版本(`Constants.expoConfig.version`),把自报新版本号的 bundle 推给旧 APK = 它们判「已最新」、永远不弹 APK(规则 A2 的同一个坑)。legacy 列表只服务「同版本重打漂移」(规则 B2),不服务跨版本。
+
 ### 同版本 APK 刷新(refresh embed,不 bump 版本)
 新装用户首个 session 跑的是 APK 内嵌 bundle;隔几个月不刷新,新用户第一印象就是老版本。刷新流程(2026-08-29 首跑):
 1. 核对 gradle 版本值(规则 B3)→ `gradlew assembleRelease` → aapt 验 version、`unzip -p` 读新指纹。
@@ -72,6 +78,7 @@
    - `aapt dump permissions <apk>` → 确认目标权限**已消失**
    - `unzip -p <apk> assets/fingerprint` → **抄下真实 runtimeVersion 哈希**(规则 B1)
    - `unzip -p <apk> assets/app.config` 里的 version → 应 = 新 version
+   - `unzip -p <apk> assets/app.manifest` 的 `commitTime` → 必须是**刚才的构建时间**,且晚于线上 OTA manifest 的 `createdAt`(规则 B4;不满足 = 启动重载死循环,禁止发布)
 5. **传 R2**:`download.arisfusion.com/aura/releases/<ver>/Nephele-Aura-<ver>.apk`(用 r2 上传脚本)。
 6. **原子更新 `aura:release` KV**(先确认 APK 已在 R2,再写 KV):
    `{version, runtimeVersion=<步骤4抄的哈希>, apkUrl, notes, mandatory}`。
