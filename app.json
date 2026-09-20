@@ -2,8 +2,8 @@
   "expo": {
     "name": "Nephele",
     "slug": "nephele-workshop",
-    "version": "0.1.4",
-    "orientation": "portrait",
+    "version": "0.1.5",
+    "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
@@ -37,7 +37,7 @@
       "edgeToEdgeEnabled": true,
       "softwareKeyboardLayoutMode": "resize",
       "package": "com.creatoraris.nephele.aura",
-      "versionCode": 5,
+      "versionCode": 6,
       "permissions": [
         "android.permission.REQUEST_INSTALL_PACKAGES"
       ]

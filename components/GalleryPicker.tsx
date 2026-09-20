@@ -7,21 +7,28 @@
 //
 // Selection is built for backlogs of thousands of photos:
 //   - day-grouped sections with a per-day select-all toggle
-//   - swipe-select: a mostly-horizontal drag starting on a cell sweeps a range
-//     (selects or deselects to match the anchor cell), with edge auto-scroll
+//   - sweep-select, two ways in, both selecting or deselecting to match the
+//     anchor cell, with edge auto-scroll:
+//       * long-press a cell, then drag in ANY direction
+//       * a horizontal drag starting on a cell
+//     Both are gesture-handler pans arbitrated natively against the list
+//     scroll. The old JS PanResponder lost that race on Android: the native
+//     ScrollView intercepts at its ~8dp touch slop, before a JS-thread capture
+//     decision lands, so any slightly diagonal sweep turned into a scroll.
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Dimensions,
   FlatList,
   Modal,
-  PanResponder,
   Pressable,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
 } from 'react-native';
+import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import { Image } from 'expo-image';
+import * as Haptics from 'expo-haptics';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as MediaLibrary from 'expo-media-library';
 import { Check, ChevronDown } from 'lucide-react-native';
@@ -30,8 +37,12 @@ import { colors } from '../theme/colors';
 
 export type PickedAsset = { uri: string; mimeType: string; fileName: string };
 
-const NUM_COLUMNS = 4;
+const MIN_COLUMNS = 4;
+const TARGET_CELL = 120;   // wide windows (landscape / tablet) add columns past 4
 const GAP = 2;
+const LONG_PRESS_MS = 220;
+const SWEEP_ACTIVE_X = 12; // horizontal travel that starts a sweep...
+const SWEEP_FAIL_Y = 14;   // ...unless vertical travel gets here first (-> scroll)
 const PAGE_SIZE = 300;
 const HEADER_H = 40;
 const EDGE_PX = 72;        // auto-scroll trigger band at list top/bottom
@@ -179,9 +190,10 @@ export function GalleryPicker({
   const seenRef = useRef<Map<string, MediaLibrary.Asset>>(new Map());
   const albumsLoadedRef = useRef(false);
 
-  const cell = Math.floor(
-    (Dimensions.get('window').width - GAP * (NUM_COLUMNS - 1)) / NUM_COLUMNS,
-  );
+  // Live width, not a module-load snapshot: the grid reflows on rotation.
+  const { width: winW } = useWindowDimensions();
+  const cols = Math.max(MIN_COLUMNS, Math.floor(winW / TARGET_CELL));
+  const cell = Math.floor((winW - GAP * (cols - 1)) / cols);
   const rowH = cell + GAP;
 
   const selSet = useMemo(() => new Set(selected), [selected]);
@@ -207,17 +219,17 @@ export function GalleryPicker({
         label: dayLabel(group[0].creationTime),
         ids: group.map(a => a.id),
       });
-      for (let j = 0; j < group.length; j += NUM_COLUMNS) {
+      for (let j = 0; j < group.length; j += cols) {
         out.push({
           type: 'photos',
           key: `p-${key}-${j}`,
-          assets: group.slice(j, j + NUM_COLUMNS),
+          assets: group.slice(j, j + cols),
           startIndex: groupStart + j,
         });
       }
     }
     return out;
-  }, [assets]);
+  }, [assets, cols]);
 
   // Cumulative y offset per row — shared by getItemLayout and drag hit-testing.
   const rowOffsets = useMemo(() => {
@@ -319,13 +331,14 @@ export function GalleryPicker({
     });
   }, []);
 
-  // ---- swipe-select ------------------------------------------------------
-  // Refs (not state): the responder callbacks and the auto-scroll loop run
+  // ---- sweep-select ------------------------------------------------------
+  // Refs (not state): the gesture callbacks and the auto-scroll loop run
   // outside React's render cycle and need current values synchronously.
   const listRef = useRef<FlatList<Row>>(null);
   const scrollYRef = useRef(0);
-  const viewportRef = useRef({ h: 0, winY: 0, winX: 0 });
-  const wrapRef = useRef<View>(null);
+  const viewportHRef = useRef(0);
+  const gridRef = useRef({ cols, cell });
+  gridRef.current = { cols, cell };
   const rowsRef = useRef(rows);
   rowsRef.current = rows;
   const offsetsRef = useRef(rowOffsets);
@@ -361,9 +374,10 @@ export function GalleryPicker({
     }
     const row = curRows[lo];
     if (row.type !== 'photos') return null;
-    const col = Math.max(0, Math.min(NUM_COLUMNS - 1, Math.floor(x / (cell + GAP))));
+    const g = gridRef.current;
+    const col = Math.max(0, Math.min(g.cols - 1, Math.floor(x / (g.cell + GAP))));
     return row.startIndex + Math.min(col, row.assets.length - 1);
-  }, [cell]);
+  }, []);
 
   const applySweep = useCallback((cur: number) => {
     const d = dragRef.current;
@@ -393,7 +407,7 @@ export function GalleryPicker({
   }, []);
 
   const maybeAutoScroll = useCallback((y: number) => {
-    const { h } = viewportRef.current;
+    const h = viewportHRef.current;
     if (!h) return;
     const nearTop = y < EDGE_PX;
     const nearBottom = y > h - EDGE_PX;
@@ -408,7 +422,7 @@ export function GalleryPicker({
         stopAutoScroll();
         return;
       }
-      const { h: vh } = viewportRef.current;
+      const vh = viewportHRef.current;
       const fy = d.lastY;
       let dyPerTick = 0;
       if (fy < EDGE_PX) dyPerTick = -EDGE_SPEED * (1 - fy / EDGE_PX);
@@ -430,53 +444,68 @@ export function GalleryPicker({
     setDragging(false);
   }, [stopAutoScroll]);
 
-  const panResponder = useMemo(
-    () =>
-      PanResponder.create({
-        onStartShouldSetPanResponder: () => false,
-        onMoveShouldSetPanResponderCapture: (_evt, g) => {
-          // A mostly-horizontal drag that starts on a photo cell begins a
-          // sweep; vertical movement stays with the FlatList scroll.
-          if (Math.abs(g.dx) < 10 || Math.abs(g.dx) <= Math.abs(g.dy) * 1.2) return false;
-          const { winX, winY } = viewportRef.current;
-          const x = g.x0 - winX;
-          const y = g.y0 - winY;
-          const idx = hitTest(x, y);
-          if (idx == null) return false;
-          const id = assetsRef.current[idx]?.id;
-          if (!id) return false;
-          const snapshot = selectedRef.current;
-          dragRef.current = {
-            active: true,
-            anchor: idx,
-            target: !snapshot.includes(id),
-            snapshot,
-            snapshotSet: new Set(snapshot),
-            lastX: x,
-            lastY: y,
-          };
-          setDragging(true);
-          applySweep(idx);
-          return true;
-        },
-        onPanResponderMove: (_evt, g) => {
-          const d = dragRef.current;
-          if (!d || !d.active) return;
-          const { winX, winY } = viewportRef.current;
-          const x = g.moveX - winX;
-          const y = g.moveY - winY;
-          d.lastX = x;
-          d.lastY = y;
-          const idx = hitTest(x, y);
-          if (idx != null) applySweep(idx);
-          maybeAutoScroll(y);
-        },
-        onPanResponderRelease: endDrag,
-        onPanResponderTerminate: endDrag,
-        onPanResponderTerminationRequest: () => false,
-      }),
-    [applySweep, endDrag, hitTest, maybeAutoScroll],
-  );
+  // x/y are local to the list wrapper (the GestureDetector's view).
+  const beginSweep = useCallback((x: number, y: number): boolean => {
+    const idx = hitTest(x, y);
+    const id = idx == null ? undefined : assetsRef.current[idx]?.id;
+    if (idx == null || !id) return false;
+    const snapshot = selectedRef.current;
+    dragRef.current = {
+      active: true,
+      anchor: idx,
+      target: !snapshot.includes(id),
+      snapshot,
+      snapshotSet: new Set(snapshot),
+      lastX: x,
+      lastY: y,
+    };
+    setDragging(true);
+    applySweep(idx);
+    return true;
+  }, [applySweep, hitTest]);
+
+  const moveSweep = useCallback((x: number, y: number) => {
+    const d = dragRef.current;
+    if (!d || !d.active) return;
+    d.lastX = x;
+    d.lastY = y;
+    const idx = hitTest(x, y);
+    if (idx != null) applySweep(idx);
+    maybeAutoScroll(y);
+  }, [applySweep, hitTest, maybeAutoScroll]);
+
+  // A horizontal sweep anchors on the cell where the finger LANDED, not where
+  // it was once the pan crossed its activation threshold.
+  const downRef = useRef({ x: 0, y: 0 });
+
+  const gestures = useMemo(() => {
+    const swipePan = Gesture.Pan()
+      .runOnJS(true)
+      .maxPointers(1)
+      .activeOffsetX([-SWEEP_ACTIVE_X, SWEEP_ACTIVE_X])
+      .failOffsetY([-SWEEP_FAIL_Y, SWEEP_FAIL_Y])
+      .onBegin(e => { downRef.current = { x: e.x, y: e.y }; })
+      .onStart(() => { beginSweep(downRef.current.x, downRef.current.y); })
+      .onUpdate(e => moveSweep(e.x, e.y))
+      // onEnd, not onFinalize: finalize also fires for a pan that never
+      // activated (it lost the race) and would kill the winner's sweep.
+      .onEnd(endDrag);
+    const holdPan = Gesture.Pan()
+      .runOnJS(true)
+      .maxPointers(1)
+      .activateAfterLongPress(LONG_PRESS_MS)
+      .onStart(e => {
+        if (beginSweep(e.x, e.y)) Haptics.selectionAsync().catch(() => {});
+      })
+      .onUpdate(e => moveSweep(e.x, e.y))
+      .onEnd(endDrag);
+    // The list scroll waits for the horizontal pan to FAIL (cheap: it fails
+    // the moment vertical travel passes SWEEP_FAIL_Y), so a diagonal sweep is
+    // decided by the pan's thresholds instead of being stolen at touch slop.
+    // holdPan needs no relation: once active it cancels the native scroll.
+    const scroll = Gesture.Native().requireExternalGestureToFail(swipePan);
+    return { sweep: Gesture.Race(swipePan, holdPan), scroll };
+  }, [beginSweep, endDrag, moveSweep]);
 
   useEffect(() => stopAutoScroll, [stopAutoScroll]);
 
@@ -560,20 +589,19 @@ export function GalleryPicker({
     [rowH],
   );
 
-  const measureWrap = useCallback(() => {
-    wrapRef.current?.measureInWindow((x, y, _w, h) => {
-      viewportRef.current = { winX: x, winY: y, h };
-    });
-  }, []);
-
   return (
     <Modal
       visible={visible}
       animationType="slide"
       onRequestClose={onClose}
       statusBarTranslucent
+      supportedOrientations={['portrait', 'landscape']}
     >
-      <SafeAreaView style={styles.root} edges={['top', 'bottom']}>
+      {/* RN <Modal> is its own native window, outside the app's root
+          GestureHandlerRootView — without re-rooting, the detectors below
+          receive no touches. */}
+      <GestureHandlerRootView style={{ flex: 1 }}>
+      <SafeAreaView style={styles.root} edges={['top', 'bottom', 'left', 'right']}>
         <View style={styles.header}>
           <Pressable onPress={onClose} hitSlop={10}>
             <Text style={styles.cancel}>取消</Text>
@@ -641,15 +669,13 @@ export function GalleryPicker({
             }}
           />
         ) : (
+          <GestureDetector gesture={gestures.sweep}>
           <View
-            ref={wrapRef}
             style={{ flex: 1 }}
-            onLayout={measureWrap}
-            // Re-measure on touch: onLayout can fire mid slide-in animation and
-            // capture a translated winY, which would skew every sweep hit-test.
-            onTouchStart={measureWrap}
-            {...panResponder.panHandlers}
+            collapsable={false}
+            onLayout={e => { viewportHRef.current = e.nativeEvent.layout.height; }}
           >
+            <GestureDetector gesture={gestures.scroll}>
             <FlatList
               ref={listRef}
               data={rows}
@@ -674,9 +700,12 @@ export function GalleryPicker({
                 ) : null
               }
             />
+            </GestureDetector>
           </View>
+          </GestureDetector>
         )}
       </SafeAreaView>
+      </GestureHandlerRootView>
     </Modal>
   );
 }

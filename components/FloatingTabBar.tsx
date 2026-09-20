@@ -21,6 +21,7 @@ import { uploadBus } from '../utils/uploadBus';
 export const TAB_BAR_HEIGHT = 54;   // mainstream mobile bar ~50-56 (was tmui's 60)
 const SIDE_MARGIN = 16;
 const BOTTOM_GAP = 10;
+const MAX_BAR_W = 480;     // landscape / tablet: keep phone proportions, centered
 const BAR_RADIUS = 22;
 const NOTCH_R = 33;        // scales with FAB → keeps even 7px gap
 const FAB_SIZE = 52;       // ~mainstream center FAB (was tmui's 60)
@@ -103,8 +104,12 @@ export function FloatingTabBar({ state, descriptors, navigation }: BottomTabBarP
   const slots = [...tabs.slice(0, mid), <View key="__notch" style={styles.item} pointerEvents="none" />, ...tabs.slice(mid)];
 
   return (
-    <View pointerEvents="box-none" style={[styles.wrap, { bottom: insets.bottom + BOTTOM_GAP }]}>
-      <View style={{ width: '100%', height: TAB_BAR_HEIGHT }} onLayout={(e) => setBarW(e.nativeEvent.layout.width)}>
+    <View pointerEvents="box-none" style={[styles.wrap, {
+      bottom: insets.bottom + BOTTOM_GAP,
+      left: SIDE_MARGIN + insets.left,
+      right: SIDE_MARGIN + insets.right,
+    }]}>
+      <View style={{ width: '100%', maxWidth: MAX_BAR_W, height: TAB_BAR_HEIGHT }} onLayout={(e) => setBarW(e.nativeEvent.layout.width)}>
         {barW > 0 && (
           <Svg width={barW} height={TAB_BAR_HEIGHT} style={StyleSheet.absoluteFill}>
             <Defs>
@@ -147,7 +152,7 @@ export function FloatingTabBar({ state, descriptors, navigation }: BottomTabBarP
 }
 
 const styles = StyleSheet.create({
-  wrap: { position: 'absolute', left: SIDE_MARGIN, right: SIDE_MARGIN },
+  wrap: { position: 'absolute', alignItems: 'center' },
   row: { ...StyleSheet.absoluteFillObject, flexDirection: 'row', alignItems: 'center' },
   item: { flex: 1, alignItems: 'center', justifyContent: 'center', height: '100%' },
   itemInner: { alignItems: 'center', justifyContent: 'center', gap: 3 },

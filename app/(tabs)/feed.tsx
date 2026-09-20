@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, Dimensions, Pressable, RefreshControl } from 'react-native';
+import { Alert, Pressable, RefreshControl, useWindowDimensions } from 'react-native';
 import { YStack, XStack, Text, Spinner } from 'tamagui';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { FlashList } from '@shopify/flash-list';
@@ -26,10 +26,12 @@ type DiscoverFilter = TrendingMode | 'pixivision';
 // 2-column masonry geometry — mirrors the gallery grid (index.tsx) so the feed
 // reads as the same compact, aspect-ratio-aware tile grid rather than a
 // full-width forced-square stream (which crop-jumps on cell recycle).
-const SCREEN_W = Dimensions.get('window').width;
 const GAP = 6;
 const PAD = 12;
-const COL_W = (SCREEN_W - PAD * 2 - GAP) / 2;
+// Column count follows the LIVE window width (rotation / tablets), 2 minimum.
+const TARGET_COL_W = 210;
+const colsFor = (winW: number) => Math.max(2, Math.floor(winW / TARGET_COL_W));
+const colWidthFor = (cols: number, winW: number) => (winW - PAD * 2 - GAP * (cols - 1)) / cols;
 
 const DISCOVER_FILTERS: { key: DiscoverFilter; label: string }[] = [
   { key: 'daily', label: '日榜' },
@@ -82,17 +84,17 @@ function badgeFor(it: FeedItem): { text: string; tint: string } {
 // (an onLoad-driven height would relayout recycled cells mid-scroll = flicker,
 // see project_aura_gallery_transition_flicker). Square fallback when dims are
 // unknown (inbox / pixivision items don't carry them).
-function cellHeight(it: FeedItem): number {
-  if (it.kind === 'article') return Math.round(COL_W * 0.62) + 2;   // 16:10-ish banner
+function cellHeight(it: FeedItem, colW: number): number {
+  if (it.kind === 'article') return Math.round(colW * 0.62) + 2;   // 16:10-ish banner
   const ar = it.width && it.height ? it.width / it.height : 1;
-  return Math.round(Math.min(Math.max(COL_W / ar, COL_W * 0.62), COL_W * 1.9));
+  return Math.round(Math.min(Math.max(colW / ar, colW * 0.62), colW * 1.9));
 }
 
-const FeedCell = memo(function FeedCell({ item, state, onSave, onOpen }: {
-  item: FeedItem; state: SaveState;
+const FeedCell = memo(function FeedCell({ item, state, colW, onSave, onOpen }: {
+  item: FeedItem; state: SaveState; colW: number;
   onSave: (item: FeedItem) => void; onOpen: (item: FeedItem) => void;
 }) {
-  const h = cellHeight(item);
+  const h = cellHeight(item, colW);
   const isArticle = item.kind === 'article';
   const badge = badgeFor(item);
 
@@ -222,6 +224,9 @@ function Chip({ label, active, onPress }: { label: string; active: boolean; onPr
 
 export default function FeedScreen() {
   const router = useRouter();
+  const { width: winW } = useWindowDimensions();
+  const cols = colsFor(winW);
+  const colW = colWidthFor(cols, winW);
   const [tab, setTab] = useState<Tab>('follow');
   const [discoverFilter, setDiscoverFilter] = useState<DiscoverFilter>('daily');
   const [article, setArticle] = useState<{ id: string; title: string } | null>(null);
@@ -442,14 +447,17 @@ export default function FeedScreen() {
   } else {
     body = (
       <FlashList
+        // Remount on column change: FlashList's masonry engine keeps per-cell
+        // arrangement state that a live numColumns flip corrupts (same as index.tsx).
+        key={`cols-${cols}`}
         data={items}
-        numColumns={2}
+        numColumns={cols}
         masonry
         optimizeItemArrangement
         keyExtractor={feedKey}
         getItemType={(it) => it.kind || 'illust'}   // keep article vs illust in separate recycle pools
         renderItem={({ item }) => (
-          <FeedCell item={item} state={saveState[item.illust_id] ?? 'idle'}
+          <FeedCell item={item} state={saveState[item.illust_id] ?? 'idle'} colW={colW}
             onSave={requestSave} onOpen={onOpen} />
         )}
         extraData={saveState}

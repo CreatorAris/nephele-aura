@@ -21,7 +21,11 @@ export function AuraActionSheet({ visible, title, options, onClose }: {
   return (
     <Modal visible={visible} transparent animationType="slide" statusBarTranslucent onRequestClose={onClose}>
       <Pressable style={styles.scrim} onPress={onClose}>
-        <Pressable style={{ paddingHorizontal: 12, paddingBottom: insets.bottom + 12 }} onPress={() => {}}>
+        <Pressable
+          // Phone-width and centered on wide windows (landscape / tablet).
+          style={{ paddingHorizontal: 12, paddingBottom: insets.bottom + 12, width: '100%', maxWidth: 560, alignSelf: 'center' }}
+          onPress={() => {}}
+        >
           <LinearGradient colors={['#403979', '#332C5E']} start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }} style={styles.panel}>
             {title ? (
               <Text color={colors.text.tertiary} fontSize={13} textAlign="center" paddingVertical={12}>{title}</Text>

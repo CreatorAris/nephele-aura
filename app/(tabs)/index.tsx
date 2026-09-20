@@ -1,5 +1,5 @@
 import {
-  Pressable, Dimensions, Modal, ScrollView, FlatList,
+  Pressable, Modal, ScrollView, FlatList,
   BackHandler, Platform, StyleSheet, Alert, View, Keyboard, Linking,
   useWindowDimensions,
 } from 'react-native';
@@ -80,8 +80,6 @@ const thumbCacheKey = (item: Pick<LibraryItem, 'id' | 'size'>) => `${item.id}:${
 
 // --- Constants ---
 
-const SCREEN_W = Dimensions.get('window').width;
-const SCREEN_H = Dimensions.get('window').height;
 const GAP = 6;
 const PAD = 6;
 // Column width from the LIVE window width (useWindowDimensions), not the
@@ -90,7 +88,14 @@ const PAD = 6;
 // to the old constant.
 const colWidthFor = (cols: number, winW: number) => (winW - PAD * 2 - GAP * (cols - 1)) / cols;
 // 竖屏可见密度可切 2⇄3 列（2026-08-28 反馈「竖屏可观看数目较少」），持久化。
+// Bottom sheets stay phone-width and centered on wide windows.
+const SHEET_MAX_W = 560;
 const GRID_COLS_KEY = 'library.gridCols';
+// The 2/3 toggle is a density preference, not a literal column count: wide
+// windows (landscape, tablets) fit as many columns of that density as they can.
+const TARGET_COL_W: Record<number, number> = { 2: 210, 3: 150 };
+const colsFor = (density: number, winW: number) =>
+  Math.max(density, Math.floor(winW / TARGET_COL_W[density]));
 const PAGE_SIZE = 40;
 // Re-request a visible WAN thumb if it hasn't arrived within this window — a
 // lost response (relay flap / dropped base64) must not blank a cell forever.
@@ -142,7 +147,7 @@ export default function GalleryScreen() {
   // Last visible index — anchor for the WAN thumb ahead-prefetch window.
   const maxVisibleIdx = useRef(0);
   // 网格密度 2⇄3 列，持久化；列宽随实时窗宽算（转屏/分屏正确）。
-  const { width: winW } = useWindowDimensions();
+  const { width: winW, height: winH } = useWindowDimensions();
   const [gridCols, setGridCols] = useState(2);
   useEffect(() => {
     AsyncStorage.getItem(GRID_COLS_KEY)
@@ -156,7 +161,8 @@ export default function GalleryScreen() {
       return next;
     });
   }, []);
-  const colW = colWidthFor(gridCols, winW);
+  const cols = colsFor(gridCols, winW);
+  const colW = colWidthFor(cols, winW);
   const [detailItem, setDetailItem] = useState<LibraryItem | null>(null);
   // Delete confirm is hoisted out of DetailModal: an AuraDialog nested inside
   // DetailModal's <Modal> is the Android two-modal touch footgun. Held here, it
@@ -1592,20 +1598,20 @@ export default function GalleryScreen() {
       </Animated.View>
 
       {loading ? (
-        <SkeletonGrid topPad={listTopPad} />
+        <SkeletonGrid topPad={listTopPad} cols={cols} />
       ) : (
         <AnimatedFlashList
           // Remount on density change: FlashList's masonry layout engine keeps
           // per-cell arrangement state that a live numColumns flip corrupts.
-          key={`cols-${gridCols}`}
+          key={`cols-${cols}`}
           data={items}
-          numColumns={gridCols}
+          numColumns={cols}
           masonry
           optimizeItemArrangement
           // Mount cells ~1.5 screens ahead (default 250px): LAN thumbs load by
           // URL when the cell mounts, so a bigger draw window = images ready
           // before they scroll in (2026-08-28 反馈「加载时间影响阅读流畅性」).
-          drawDistance={Math.round(SCREEN_H * 1.5)}
+          drawDistance={Math.round(winH * 1.5)}
           renderItem={renderCell}
           // Without keyExtractor, FlashList falls back to index as the React
           // key. Index keys break when items grows (loadMore append), causing
@@ -1870,6 +1876,7 @@ function FolderFilterSheet({ visible, folders, activeId, onSelect, onClose,
   onRequestRename?: (f: LibraryFolder) => void;
 }) {
   const insets = useSafeAreaInsets();
+  const { height: winH } = useWindowDimensions();
   // Flatten on each render — folders is small (≤ hundreds) so memoization
   // would mostly add noise. If we ever see real cost, wrap with useMemo.
   const rows = visible ? flattenFolderTree(folders) : [];
@@ -1880,7 +1887,8 @@ function FolderFilterSheet({ visible, folders, activeId, onSelect, onClose,
       <Pressable style={{ flex: 1, backgroundColor: colors.overlay.scrim }} onPress={onClose}>
         <Pressable
           style={{
-            position: 'absolute', bottom: 0, left: 0, right: 0,
+            position: 'absolute', bottom: 0, alignSelf: 'center',
+            width: '100%', maxWidth: SHEET_MAX_W,
             backgroundColor: colors.bg.surface,
             borderTopLeftRadius: 20, borderTopRightRadius: 20,
             maxHeight: '70%',
@@ -1904,7 +1912,7 @@ function FolderFilterSheet({ visible, folders, activeId, onSelect, onClose,
           </XStack>
 
           <FlatList
-            style={{ maxHeight: SCREEN_H * 0.55 }}
+            style={{ maxHeight: winH * 0.55 }}
             data={rows}
             keyExtractor={f => f.id}
             initialNumToRender={20}
@@ -1994,6 +2002,7 @@ function TagPickerSheet({ visible, tags, activeTags, onToggle,
   onClose: () => void;
 }) {
   const insets = useSafeAreaInsets();
+  const { height: winH } = useWindowDimensions();
   const [query, setQuery] = useState('');
   if (!visible) return null;
 
@@ -2006,7 +2015,8 @@ function TagPickerSheet({ visible, tags, activeTags, onToggle,
       <Pressable style={{ flex: 1, backgroundColor: colors.overlay.scrim }} onPress={onClose}>
         <Pressable
           style={{
-            position: 'absolute', bottom: 0, left: 0, right: 0,
+            position: 'absolute', bottom: 0, alignSelf: 'center',
+            width: '100%', maxWidth: SHEET_MAX_W,
             backgroundColor: colors.bg.surface,
             borderTopLeftRadius: 20, borderTopRightRadius: 20,
             maxHeight: '78%',
@@ -2067,7 +2077,7 @@ function TagPickerSheet({ visible, tags, activeTags, onToggle,
           </XStack>
 
           <FlatList
-            style={{ maxHeight: SCREEN_H * 0.45 }}
+            style={{ maxHeight: winH * 0.45 }}
             data={filtered}
             keyExtractor={t => t.name}
             initialNumToRender={20}
@@ -2189,7 +2199,7 @@ function SkeletonBlock({ h, pulseStyle }: {
   );
 }
 
-function SkeletonGrid({ topPad = 4 }: { topPad?: number }) {
+function SkeletonGrid({ topPad = 4, cols = 2 }: { topPad?: number; cols?: number }) {
   const opacity = useSharedValue(0.45);
   useEffect(() => {
     opacity.value = withRepeat(
@@ -2203,17 +2213,16 @@ function SkeletonGrid({ topPad = 4 }: { topPad?: number }) {
   }, [opacity]);
   const pulseStyle = useAnimatedStyle(() => ({ opacity: opacity.value }));
 
-  const heights = [180, 240, 200, 160, 220, 180, 240, 200];
-  const left = heights.filter((_, i) => i % 2 === 0);
-  const right = heights.filter((_, i) => i % 2 === 1);
+  const heights = [180, 240, 200, 160];
   return (
-    <XStack paddingHorizontal={PAD} paddingTop={topPad + 4}>
-      <YStack flex={1} marginRight={GAP / 2}>
-        {left.map((h, i) => <SkeletonBlock key={`l-${i}`} h={h} pulseStyle={pulseStyle} />)}
-      </YStack>
-      <YStack flex={1} marginLeft={GAP / 2}>
-        {right.map((h, i) => <SkeletonBlock key={`r-${i}`} h={h} pulseStyle={pulseStyle} />)}
-      </YStack>
+    <XStack paddingHorizontal={PAD} paddingTop={topPad + 4} gap={GAP}>
+      {Array.from({ length: cols }, (_, c) => (
+        <YStack key={c} flex={1}>
+          {heights.map((_, i) => (
+            <SkeletonBlock key={i} h={heights[(i + c) % heights.length]} pulseStyle={pulseStyle} />
+          ))}
+        </YStack>
+      ))}
     </XStack>
   );
 }
@@ -2424,6 +2433,7 @@ function DetailModal({ item, items, getThumb, getFull, onClose, onOpenLightbox,
   // whichever page is currently active in the pager.
   const thumbRef = useAnimatedRef<Animated.View>();
   const insets = useSafeAreaInsets();
+  const { width: winW, height: winH } = useWindowDimensions();
   const pagerRef = useRef<PagerView | null>(null);
 
   // currentIndex is derived from item.id rather than tracked separately so
@@ -2443,6 +2453,9 @@ function DetailModal({ item, items, getThumb, getFull, onClose, onOpenLightbox,
   // already in sync by the time the effect runs, so they're a no-op.
   useEffect(() => {
     if (currentIndex < 0) return;
+    // Rotation swaps the portrait/wide layout and remounts the pager, which
+    // re-reads initialPage — keep it on the current page, not the mount-time one.
+    initialIndexRef.current = currentIndex;
     if (pagerPageRef.current === currentIndex) return;
     pagerPageRef.current = currentIndex;
     pagerRef.current?.setPageWithoutAnimation(currentIndex);
@@ -2467,7 +2480,7 @@ function DetailModal({ item, items, getThumb, getFull, onClose, onOpenLightbox,
     })
     .onEnd(e => {
       if (e.translationY > 100 || e.velocityY > 800) {
-        dragY.value = withTiming(SCREEN_H, { duration: 200 }, (finished) => {
+        dragY.value = withTiming(winH, { duration: 200 }, (finished) => {
           if (finished) runOnJS(onClose)();
         });
       } else {
@@ -2478,8 +2491,12 @@ function DetailModal({ item, items, getThumb, getFull, onClose, onOpenLightbox,
   // Hero height adapts to the current image's aspect (capped) so the sheet is
   // only as tall as the image needs — a wide/short image yields a short hero.
   // Animated so swiping between images of different ratios eases the height.
-  const imgW = SCREEN_W - 40;                       // 20px gutter each side
-  const imgHCap = Math.min(SCREEN_H * 0.42, 400);
+  // Wide (landscape phone / tablet): image left, details in a right column.
+  const wide = winW > winH && winW >= 640;
+  const metaW = Math.min(420, Math.max(340, Math.round(winW * 0.34)));
+  const heroW = wide ? winW - metaW - insets.left - insets.right : winW;
+  const imgW = heroW - 40;                          // 20px gutter each side
+  const imgHCap = Math.min(winH * 0.42, 400);
   const activeItem = items[currentIndex] ?? item;
   const activeAr = activeItem?.width && activeItem?.height ? activeItem.width / activeItem.height : 1;
   const activeHIt = Math.min(imgW / activeAr, imgHCap);
@@ -2529,55 +2546,16 @@ function DetailModal({ item, items, getThumb, getFull, onClose, onOpenLightbox,
   const displayName = item.name.replace(/\.[^.]+$/, '');
   const star = item.star || 0;
 
-  return (
-    <Modal visible animationType="slide" transparent onRequestClose={onClose}>
-      {/* GestureHandlerRootView is REQUIRED here: RN <Modal> renders in its own
-          native window outside the app's root GestureHandlerRootView, so without
-          re-rooting it the handle's GestureDetector gets no touch events at all.
-          The backdrop is a sibling Pressable; the sheet sits on top by order. */}
-      <GestureHandlerRootView style={{ flex: 1 }}>
-        <Pressable
-          style={{ ...StyleSheet.absoluteFillObject, backgroundColor: colors.overlay.scrim }}
-          onPress={onClose}
-        />
-        <Animated.View
-          style={[{
-            position: 'absolute',
-            bottom: 0, left: 0, right: 0,
-            backgroundColor: colors.bg.canvas,
-            borderTopLeftRadius: 20,
-            borderTopRightRadius: 20,
-            maxHeight: '92%',
-            overflow: 'hidden',
-          }, sheetStyle]}
-        >
-          {/* Drag handle — the grab affordance. ONLY this zone drives the
-              follow-the-finger drag-to-dismiss; the hero below stays a normal
-              image (tap = lightbox, horizontal swipe = pager). */}
-          <GestureDetector gesture={dismissGesture}>
-            <YStack alignItems="center" paddingTop={12} paddingBottom={10}>
-              <YStack width={44} height={5} borderRadius={3}
-                backgroundColor={colors.border.default} />
-            </YStack>
-          </GestureDetector>
-
-          {/* Single ScrollView owns BOTH the hero and the metadata, so the hero
-              scrolls away naturally (no scroll-linked layout). */}
-          <ScrollView
-            style={{ flexShrink: 1 }}
-            contentContainerStyle={{ paddingTop: 4, paddingBottom: 24 }}
-            keyboardShouldPersistTaps="handled"
-            showsVerticalScrollIndicator={false}
-          >
-          {/* Hero pager — a scroll child; height animates to the current image's
-              aspect so the sheet is only as tall as needed. Each page's image
-              fills the container and contains within it; only the active page
-              (±1) mounts an Image. The active page wears thumbRef for the
-              lightbox hero measurement. */}
-          <Animated.View style={[{ width: SCREEN_W }, heroSizeStyle]}>
+  // Hero pager. Portrait: a scroll child whose height animates to the current
+  // image's aspect, so the sheet is only as tall as needed. Wide: fills the
+  // left pane. Each page's image contains within it; only the active page (±1)
+  // mounts an Image. The active page wears thumbRef for the lightbox hero
+  // measurement.
+  const hero = (
+          <Animated.View style={wide ? { flex: 1 } : [{ width: winW }, heroSizeStyle]}>
             <PagerView
               ref={pagerRef}
-              style={{ flex: 1, width: SCREEN_W }}
+              style={{ flex: 1, width: heroW }}
               initialPage={initialIndexRef.current}
               onPageSelected={e => {
                 const pos = e.nativeEvent.position;
@@ -2629,12 +2607,15 @@ function DetailModal({ item, items, getThumb, getFull, onClose, onOpenLightbox,
             </PagerView>
             {/* Soft edge — image melts into the content background instead of a
                 hard rectangular cut. */}
-            <ExpoLinearGradient pointerEvents="none"
-              colors={['transparent', colors.bg.canvas]}
-              style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 44 }} />
+            {!wide && (
+              <ExpoLinearGradient pointerEvents="none"
+                colors={['transparent', colors.bg.canvas]}
+                style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 44 }} />
+            )}
           </Animated.View>
+  );
 
-          {/* Metadata — rises to fill the screen as the hero scrolls away. */}
+  const meta = (
           <YStack paddingHorizontal={24} paddingTop={16}>
             {/* Hero title — the work identity. Facts move into the cell group
                 below, so the title stands alone. */}
@@ -2804,14 +2785,12 @@ function DetailModal({ item, items, getThumb, getFull, onClose, onOpenLightbox,
               </YStack>
             </GlassCard>
           </YStack>
-          </ScrollView>
+  );
 
-          {/* Fixed footer — always reachable regardless of scroll position.
-              Sits on top of the safe-area bottom so destructive actions
-              don't disappear behind gesture bars. */}
-          {/* Footer — balanced filled "thin" buttons (tmui x-button soft-fill
-              idiom) instead of flat text actions. Drag handle + backdrop tap
-              already dismiss, so no redundant 关闭. */}
+  // Fixed footer — always reachable regardless of scroll position; sits on the
+  // safe-area bottom so destructive actions don't hide behind gesture bars.
+  // Drag handle + backdrop tap already dismiss, so no redundant 关闭.
+  const footer = (
           <XStack
             paddingHorizontal={20}
             paddingTop={12}
@@ -2832,6 +2811,69 @@ function DetailModal({ item, items, getThumb, getFull, onClose, onOpenLightbox,
               </Pressable>
             )}
           </XStack>
+  );
+
+  const scrollProps = {
+    contentContainerStyle: { paddingTop: 4, paddingBottom: 24 },
+    keyboardShouldPersistTaps: 'handled' as const,
+    showsVerticalScrollIndicator: false,
+  };
+
+  return (
+    <Modal visible animationType="slide" transparent onRequestClose={onClose}>
+      {/* GestureHandlerRootView is REQUIRED here: RN <Modal> renders in its own
+          native window outside the app's root GestureHandlerRootView, so without
+          re-rooting it the handle's GestureDetector gets no touch events at all.
+          The backdrop is a sibling Pressable; the sheet sits on top by order. */}
+      <GestureHandlerRootView style={{ flex: 1 }}>
+        <Pressable
+          style={{ ...StyleSheet.absoluteFillObject, backgroundColor: colors.overlay.scrim }}
+          onPress={onClose}
+        />
+        <Animated.View
+          style={[{
+            position: 'absolute',
+            bottom: 0, left: 0, right: 0,
+            backgroundColor: colors.bg.canvas,
+            borderTopLeftRadius: 20,
+            borderTopRightRadius: 20,
+            overflow: 'hidden',
+          }, wide
+            ? { height: '94%', paddingLeft: insets.left, paddingRight: insets.right }
+            : { maxHeight: '92%' },
+          sheetStyle]}
+        >
+          {/* Drag handle — the grab affordance. ONLY this zone drives the
+              follow-the-finger drag-to-dismiss; the hero below stays a normal
+              image (tap = lightbox, horizontal swipe = pager). */}
+          <GestureDetector gesture={dismissGesture}>
+            <YStack alignItems="center" paddingTop={12} paddingBottom={10}>
+              <YStack width={44} height={5} borderRadius={3}
+                backgroundColor={colors.border.default} />
+            </YStack>
+          </GestureDetector>
+
+          {wide ? (
+            // Landscape / tablet: image left at full pane height, details in a
+            // fixed-width column on the right with its own scroll.
+            <XStack flex={1}>
+              {hero}
+              <YStack width={metaW} borderLeftWidth={1} borderLeftColor={colors.border.hairline}>
+                <ScrollView style={{ flex: 1 }} {...scrollProps}>{meta}</ScrollView>
+                {footer}
+              </YStack>
+            </XStack>
+          ) : (
+            // Portrait: one ScrollView owns BOTH the hero and the metadata, so
+            // the hero scrolls away naturally (no scroll-linked layout).
+            <>
+              <ScrollView style={{ flexShrink: 1 }} {...scrollProps}>
+                {hero}
+                {meta}
+              </ScrollView>
+              {footer}
+            </>
+          )}
         </Animated.View>
       </GestureHandlerRootView>
     </Modal>
