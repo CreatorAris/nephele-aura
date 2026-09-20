@@ -22,19 +22,28 @@ const CLIENT_TYPE = 'nephele-aura';
 // L1 — OTA (expo-updates)
 // ---------------------------------------------------------------------------
 
-/**
- * Check for a JS-bundle update and download it in the background.
- * Returns true if a new bundle was fetched (it applies on the next cold start;
- * we deliberately do NOT call reloadAsync() so the current session isn't
- * interrupted). No-ops in dev or before EAS Update is configured.
- */
-export async function checkOtaUpdate(): Promise<boolean> {
+// Id of the update the last check saw / the last fetch staged; null = unknown.
+let availableId: string | null = null;
+let stagedId: string | null = null;
+const AUTO_APPLIED_KEY = 'ota.autoAppliedId';
+
+// The reload tears down the JS world; paint the app's own canvas over the gap
+// instead of expo-updates' default white.
+const RELOAD_OPTIONS = {
+  reloadScreenOptions: {
+    backgroundColor: '#1A1438',
+    fade: true,
+    spinner: { enabled: true, color: '#CEACE0', size: 'small' as const },
+  },
+};
+
+/** Manifest check only — one small request. True when a newer bundle exists. */
+export async function checkOtaAvailable(): Promise<boolean> {
   if (__DEV__ || !Updates.isEnabled) return false;
   try {
     const res = await Updates.checkForUpdateAsync();
     if (!res.isAvailable) return false;
-    await Updates.fetchUpdateAsync();
-    stagedId = (res.manifest as { id?: string } | undefined)?.id ?? null;
+    availableId = (res.manifest as { id?: string } | undefined)?.id ?? null;
     return true;
   } catch (e) {
     console.warn('[OTA] check failed', e);
@@ -42,37 +51,53 @@ export async function checkOtaUpdate(): Promise<boolean> {
   }
 }
 
-// Id of the update the last checkOtaUpdate() staged; null when unknown.
-let stagedId: string | null = null;
-const AUTO_APPLIED_KEY = 'ota.autoAppliedId';
-
-/**
- * The UNATTENDED apply (launch catch-up, background apply): at most one
- * automatic reload per update id, remembered across launches. If a reload
- * does not land on the staged update — 2026-09-21: an APK whose embedded
- * manifest predated the live OTA kept relaunching into the embedded bundle —
- * the next check reports it available again, and an unconditional reload
- * becomes an endless loop the user cannot escape. A second attempt is left
- * to the next cold start, which needs no reload.
- */
-export async function autoApplyOtaUpdate(): Promise<void> {
-  if (__DEV__ || !Updates.isEnabled || !stagedId) return;
-  const last = await AsyncStorage.getItem(AUTO_APPLIED_KEY).catch(() => null);
-  if (last === stagedId) return;
-  await AsyncStorage.setItem(AUTO_APPLIED_KEY, stagedId);
-  await Updates.reloadAsync();
+/** Download the bundle the last check found. True once it is staged. */
+export async function fetchOtaUpdate(): Promise<boolean> {
+  if (__DEV__ || !Updates.isEnabled) return false;
+  try {
+    await Updates.fetchUpdateAsync();
+    stagedId = availableId;
+    return true;
+  } catch (e) {
+    console.warn('[OTA] fetch failed', e);
+    return false;
+  }
 }
 
 /**
- * Apply an already-fetched OTA bundle NOW by reloading the JS into it — no app
- * restart, no cold start. Call after checkOtaUpdate() returned true and the user
- * opted in (see UpdateGate's reload prompt). No-ops in dev / when OTA is off.
+ * Check for a JS-bundle update and download it in the background.
+ * Returns true if a new bundle was staged; applying it is the caller's call.
+ */
+export async function checkOtaUpdate(): Promise<boolean> {
+  return (await checkOtaAvailable()) && (await fetchOtaUpdate());
+}
+
+/**
+ * The UNATTENDED apply (launch, background): at most one automatic reload per
+ * update id, remembered across launches. If a reload does not land on the
+ * staged update — 2026-09-21: an APK whose embedded manifest predated the live
+ * OTA kept relaunching into the embedded bundle — the next check reports it
+ * available again, and an unconditional reload becomes an endless loop the
+ * user cannot escape. A second attempt is left to the next cold start, which
+ * needs no reload. Returns true when a reload was started.
+ */
+export async function autoApplyOtaUpdate(): Promise<boolean> {
+  if (__DEV__ || !Updates.isEnabled || !stagedId) return false;
+  const last = await AsyncStorage.getItem(AUTO_APPLIED_KEY).catch(() => null);
+  if (last === stagedId) return false;
+  await AsyncStorage.setItem(AUTO_APPLIED_KEY, stagedId);
+  await Updates.reloadAsync(RELOAD_OPTIONS);
+  return true;
+}
+
+/**
+ * Apply an already-fetched OTA bundle NOW by reloading the JS into it — the
+ * user opted in (UpdateGate's dev reload prompt). No-ops in dev / when OTA is off.
  */
 export async function applyOtaUpdate(): Promise<void> {
   if (__DEV__ || !Updates.isEnabled) return;
-  await Updates.reloadAsync();
+  await Updates.reloadAsync(RELOAD_OPTIONS);
 }
-
 // ---------------------------------------------------------------------------
 // L2 — APK self-update (Android, self-distributed)
 // ---------------------------------------------------------------------------

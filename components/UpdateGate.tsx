@@ -5,6 +5,8 @@ import { AuraDialog } from './AuraDialog';
 import { colors } from '../theme/colors';
 import {
   checkOtaUpdate,
+  checkOtaAvailable,
+  fetchOtaUpdate,
   applyOtaUpdate,
   autoApplyOtaUpdate,
   checkApkUpdate,
@@ -14,6 +16,7 @@ import {
 import { OTA_TRIGGER_EVENT } from '../utils/push';
 import { getUserInfo } from '../utils/auth';
 import { otaHeld } from '../utils/otaGuard';
+import { useSplashReady } from './AnimatedSplash';
 import analytics from '../utils/analytics';
 
 // The developer's own accounts. OTA bundles are pushed to every device, but
@@ -32,10 +35,12 @@ const DEV_UIDS = new Set([
 //     - every device: launch + foreground + push silently fetch & stage the
 //       bundle. NO prompt (纯无感). It then APPLIES itself at the first moment
 //       nobody is looking:
-//         · launch catch-up — a fetch that lands within the first seconds of
-//           a cold start reloads immediately, so a fresh install / long-dead
-//           relaunch runs TODAY's code in its first session, not the bundle
-//           baked into a months-old APK;
+//         · launch — the cold-start check runs BEHIND the splash: the splash
+//           is held for the manifest check, and if a bundle is found, for its
+//           download too, then the reload happens before any UI was shown. A
+//           fresh install / long-dead relaunch runs TODAY's code in its first
+//           session, and nobody sees a screen appear and then blink away.
+//           Slow networks time out of the hold and fall to the path below;
 //         · background apply — the moment the app is backgrounded, a staged
 //           bundle reloads out of sight. Android users background constantly
 //           but cold-start rarely; waiting for a cold start left them weeks
@@ -47,11 +52,16 @@ const DEV_UIDS = new Set([
 //     be used on a build that's been hard-cut.
 type Phase = 'idle' | 'prompt' | 'downloading';
 
-// A fetch completing later than this after mount no longer auto-reloads at
-// launch — by then the user is mid-something, and the background apply will
-// pick it up instead. Keeps slow networks (CN reaching a blocked CDN) from
-// yanking the UI a minute into a session.
-const LAUNCH_HEAL_WINDOW_MS = 8000;
+// Splash-hold budgets for the launch check. No update = the splash is released
+// after one manifest round-trip; a slow network (CN reaching a blocked CDN)
+// gives up the hold and lets the background apply take the bundle instead.
+const LAUNCH_CHECK_MS = 1200;
+const LAUNCH_TOTAL_MS = 4000;
+
+// Resolves undefined if `p` has not settled within `ms` (p keeps running).
+function within<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
+  return Promise.race([p, new Promise<undefined>((r) => setTimeout(() => r(undefined), Math.max(0, ms)))]);
+}
 
 export function UpdateGate() {
   const [phase, setPhase] = useState<Phase>('idle');
@@ -64,7 +74,7 @@ export function UpdateGate() {
   const otaReadyRef = useRef(false);   // one is already staged — don't re-prompt/re-fetch
   const checkingRef = useRef(false);   // a check is in flight (de-dupe rapid foregrounds)
   const isDevRef = useRef(false);      // this device is logged in as the developer
-  const mountedAtRef = useRef(Date.now());  // launch-heal window anchor
+  const { holdSplash } = useSplashReady();
   const phaseRef = useRef<Phase>('idle');   // background apply must not abort an APK download
   phaseRef.current = phase;
 
@@ -94,22 +104,43 @@ export function UpdateGate() {
           otaReadyRef.current = true;   // staged → applies on next cold start regardless
           analytics.capture('aura_ota_ready', { showPrompt });
           if (showPrompt) setOtaReady(true);
-          // Launch catch-up: a bundle fetched moments after a cold start
-          // reloads NOW, so this very session runs it. Past the window (or
-          // mid-import) the background apply below takes over.
-          const sinceMount = Date.now() - mountedAtRef.current;
-          if (!showPrompt && sinceMount <= LAUNCH_HEAL_WINDOW_MS && !otaHeld()) {
-            analytics.capture('aura_ota_launch_heal', { ms: sinceMount });
-            await autoApplyOtaUpdate().catch(() => {});
-          }
         }
       } finally {
         checkingRef.current = false;
       }
     };
 
+    // Launch: check (and, if needed, download + reload) behind the splash.
+    // Resolves false when the hold timed out before the manifest check answered.
+    const launchOta = async (): Promise<boolean> => {
+      const release = holdSplash();
+      const t0 = Date.now();
+      let reloading = false;
+      try {
+        const available = await within(checkOtaAvailable(), LAUNCH_CHECK_MS);
+        if (available === undefined) return false;
+        if (cancelled || !available) return true;
+        const fetching = fetchOtaUpdate().then((ok) => {
+          if (ok) {
+            otaReadyRef.current = true;   // staged → background apply / next cold start
+            analytics.capture('aura_ota_ready', { showPrompt: false });
+          }
+          return ok;
+        });
+        const fetched = await within(fetching, LAUNCH_TOTAL_MS - (Date.now() - t0));
+        if (cancelled || !fetched || otaHeld()) return true;
+        analytics.capture('aura_ota_launch_heal', { ms: Date.now() - t0 });
+        reloading = await autoApplyOtaUpdate().catch(() => false);
+        return true;
+      } finally {
+        // Reloading: the splash stays up until the JS world is torn down.
+        if (!reloading) release();
+      }
+    };
+
     (async () => {
-      await runOta(false);                  // launch check — silent stage
+      // Check timed out behind the splash: stage in the background instead.
+      if (!(await launchOta())) void runOta(false);
       const apk = await checkApkUpdate();   // L2 (native) — separate prompt
       if (cancelled || !apk) return;
       setRelease(apk.release);

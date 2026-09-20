@@ -9,7 +9,7 @@
 // signals readiness via `useSplashReady().markReady()`.
 //
 // Pure JS (reanimated) — no native module, so it hot-reloads.
-import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { Image, StyleSheet, View } from 'react-native';
 import * as NativeSplash from 'expo-splash-screen';
 import Animated, {
@@ -40,8 +40,14 @@ const MIN_DISPLAY_MS = 800;
 const MAX_DISPLAY_MS = 4500;
 const FADE_MS = 480;
 
-type SplashCtx = { markReady: () => void };
-const SplashContext = createContext<SplashCtx>({ markReady: () => {} });
+type SplashCtx = {
+  markReady: () => void;
+  /** Keep the splash up past markReady until the returned release() runs —
+   *  the launch OTA check applies an update behind it. Bounded by
+   *  MAX_DISPLAY_MS like everything else. */
+  holdSplash: () => () => void;
+};
+const SplashContext = createContext<SplashCtx>({ markReady: () => {}, holdSplash: () => () => {} });
 
 /** Call inside the auth/onboarding gate to dismiss the splash once routing is decided. */
 export function useSplashReady() {
@@ -52,6 +58,8 @@ export function SplashProvider({ children }: { children: React.ReactNode }) {
   const [visible, setVisible] = useState(true);
   const mountedAt = useRef(Date.now());
   const dismissed = useRef(false);
+  const holds = useRef(0);
+  const readyRequested = useRef(false);
 
   const opacity = useSharedValue(1);
 
@@ -69,6 +77,24 @@ export function SplashProvider({ children }: { children: React.ReactNode }) {
     setTimeout(beginFade, wait);
   }, [beginFade]);
 
+  const markReady = useCallback(() => {
+    readyRequested.current = true;
+    if (holds.current === 0) dismiss();
+  }, [dismiss]);
+
+  const holdSplash = useCallback(() => {
+    holds.current += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      holds.current -= 1;
+      if (holds.current === 0 && readyRequested.current) dismiss();
+    };
+  }, [dismiss]);
+
+  const ctx = useMemo(() => ({ markReady, holdSplash }), [markReady, holdSplash]);
+
   // Hard safety timeout so a thrown gate can't leave the splash up forever.
   useEffect(() => {
     const t = setTimeout(dismiss, MAX_DISPLAY_MS);
@@ -78,7 +104,7 @@ export function SplashProvider({ children }: { children: React.ReactNode }) {
   const containerStyle = useAnimatedStyle(() => ({ opacity: opacity.value }));
 
   return (
-    <SplashContext.Provider value={{ markReady: dismiss }}>
+    <SplashContext.Provider value={ctx}>
       {children}
       {visible && (
         <Animated.View
