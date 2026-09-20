@@ -37,7 +37,7 @@
       "edgeToEdgeEnabled": true,
       "softwareKeyboardLayoutMode": "resize",
       "package": "com.creatoraris.nephele.aura",
-      "versionCode": 6,
+      "versionCode": 7,
       "permissions": [
         "android.permission.REQUEST_INSTALL_PACKAGES"
       ]
