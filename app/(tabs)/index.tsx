@@ -202,8 +202,15 @@ export default function GalleryScreen() {
     | { stage: 'idle' }
     | { stage: 'uploading'; current: number; total: number; failed: number }
     | { stage: 'importing'; uploaded: number; total: number; progress: number; failed: number }
-    | { stage: 'done'; processed: number; failed: number; total: number };
+    | { stage: 'done'; processed: number; failed: number; total: number }
+    | { stage: 'unknown'; total: number };
   const [importState, setImportState] = useState<ImportState>({ stage: 'idle' });
+  type BoardTarget = { sessionId: string; name: string; boardSlot: string; expiresAt: number };
+  const [boardTarget, setBoardTarget] = useState<BoardTarget | null>(null);
+  const [boardPickMode, setBoardPickMode] = useState(false);
+  const boardPickTargetRef = useRef<BoardTarget | null>(null);
+  const [boardSendName, setBoardSendName] = useState('');
+  const boardSendReqRef = useRef('');
   // Client-side upload failures, carried into the final 'done' state — the
   // desktop's result event only counts the refs it received, so without this
   // "2 张上传失败" silently became "全部成功" when the import round-trip landed.
@@ -278,6 +285,22 @@ export default function GalleryScreen() {
     const unsubDesktop = remoteWS.onDesktopStateChange(updateConnected);
     return () => { unsubState(); unsubDesktop(); };
   }, []);
+
+  useEffect(() => {
+    if (connected) return;
+    setBoardTarget(null);
+    boardPickTargetRef.current = null;
+  }, [connected]);
+  useEffect(() => {
+    if (!boardTarget) return;
+    const delay = boardTarget.expiresAt - Date.now();
+    if (delay <= 0) { setBoardTarget(null); return; }
+    const timer = setTimeout(() => setBoardTarget(current =>
+      current?.expiresAt === boardTarget.expiresAt && current.sessionId === boardTarget.sessionId
+        ? null : current
+    ), delay);
+    return () => clearTimeout(timer);
+  }, [boardTarget]);
 
   useEffect(() => {
     if (wsState === 'connected' && !connected) {
@@ -439,7 +462,13 @@ export default function GalleryScreen() {
   const processAssets = useCallback(async (
     assets: { uri: string; mimeType?: string | null; fileName?: string | null }[],
     source: 'gallery' | 'camera' | 'share' = 'gallery',
+    destinationBoard?: BoardTarget | null,
   ) => {
+    if (destinationBoard && assets.length > 20) {
+      Alert.alert('一次最多投 20 张', '请分批发送到参考板。');
+      return;
+    }
+    boardSendReqRef.current = '';
     const total = assets.length;
     let done = 0;
     let failed = 0;
@@ -519,7 +548,21 @@ export default function GalleryScreen() {
       stage: 'importing', uploaded: okRefs.length, total,
       progress: 0, failed,
     });
-    remoteWS.importFiles(okRefs, { folderId: activeFolder?.id, names: okNames });
+    if (destinationBoard) {
+      if (destinationBoard.expiresAt <= Date.now() || !remoteWS.getDesktopOnline()) {
+        setImportState({ stage: 'done', processed: 0, failed: total, total });
+        return;
+      }
+      const requestId = `board_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+      boardSendReqRef.current = requestId;
+      setBoardSendName(destinationBoard.name);
+      if (!remoteWS.sendToBoard(okRefs, destinationBoard.sessionId, requestId)) {
+        boardSendReqRef.current = '';
+        setImportState({ stage: 'done', processed: 0, failed: total, total });
+      }
+    } else {
+      remoteWS.importFiles(okRefs, { folderId: activeFolder?.id, names: okNames });
+    }
   }, [activeFolder, fileServerUrl]);
 
   // Open the in-app gallery (components/GalleryPicker). The system picker routed
@@ -527,16 +570,37 @@ export default function GalleryScreen() {
   // the in-app grid is direct-to-gallery and keeps the relay socket alive.
   const importFromGallery = useCallback(() => {
     if (importState.stage !== 'idle' && importState.stage !== 'done') return;
+    setBoardPickMode(false);
+    boardPickTargetRef.current = null;
+    setBoardSendName('');
     setGalleryVisible(true);
   }, [importState.stage]);
 
+  const sendToBoardFromGallery = useCallback(() => {
+    if (!connected || !boardTarget || boardTarget.expiresAt <= Date.now()) return;
+    if (importState.stage !== 'idle' && importState.stage !== 'done') return;
+    setBoardPickMode(true);
+    boardPickTargetRef.current = boardTarget;
+    setGalleryVisible(true);
+  }, [connected, boardTarget, importState.stage]);
+
   const onGalleryConfirm = useCallback((picked: PickedAsset[]) => {
     setGalleryVisible(false);
-    if (picked.length) processAssets(picked, 'gallery');
-  }, [processAssets]);
+    const chosenBoard = boardPickTargetRef.current;
+    boardPickTargetRef.current = null;
+    if (boardPickMode && (!connected || !chosenBoard || chosenBoard.expiresAt <= Date.now()
+        || boardTarget?.sessionId !== chosenBoard.sessionId)) {
+      Alert.alert('参考板目标已变更', '请在桌面参考板重新打开手机投图。');
+      setBoardPickMode(false);
+      return;
+    }
+    if (picked.length) processAssets(picked, 'gallery', boardPickMode ? chosenBoard : null);
+    setBoardPickMode(false);
+  }, [processAssets, boardPickMode, boardTarget, connected]);
 
   const importFromCamera = useCallback(async () => {
     if (importState.stage !== 'idle' && importState.stage !== 'done') return;
+    setBoardSendName('');
     try {
       const perm = await ImagePicker.requestCameraPermissionsAsync();
       if (!perm.granted) {
@@ -642,6 +706,22 @@ export default function GalleryScreen() {
     return unsub;
   }, []);
 
+  useEffect(() => {
+    const unsub = remoteWS.onMessage(msg => {
+      if (msg.type !== 'event' || msg.action !== 'board_send_result' || !msg.data) return;
+      const d = msg.data as { requestId?: string; added?: number; already?: number; failed?: unknown[] };
+      if (!boardSendReqRef.current || d.requestId !== boardSendReqRef.current) return;
+      boardSendReqRef.current = '';
+      const processed = (d.added ?? 0) + (d.already ?? 0);
+      const failed = (d.failed?.length ?? 0) + uploadFailedRef.current;
+      setImportState(prev => {
+        const total = 'total' in prev ? prev.total : processed + failed;
+        return { stage: 'done', processed, failed: Math.max(failed, total - processed), total };
+      });
+    });
+    return unsub;
+  }, []);
+
   // Watchdog for the import modal: the only exit from 'importing' is the
   // desktop's result event, and a relay flap can eat it (the same loss mode
   // this file documents for full images). 3min without ANY progress → settle
@@ -653,6 +733,7 @@ export default function GalleryScreen() {
       setImportState(prev => {
         if (prev.stage !== 'uploading' && prev.stage !== 'importing') return prev;
         analytics.capture('image_import_watchdog_fired', { stage: prev.stage });
+        if (boardSendReqRef.current) return { stage: 'unknown', total: prev.total };
         const done = prev.stage === 'importing' ? prev.progress : prev.current;
         return { stage: 'done', processed: done, failed: Math.max(0, prev.total - done), total: prev.total };
       });
@@ -932,7 +1013,8 @@ export default function GalleryScreen() {
     const unsub = remoteWS.onMessage((msg: RemoteMessage) => {
       if (!msg.data) return;
       if (msg.type === 'status') {
-        const d = msg.data as { fileServerUrls?: string[]; uploadToken?: string };
+        const d = msg.data as { fileServerUrls?: string[]; uploadToken?: string; boardTarget?: BoardTarget };
+        setBoardTarget(d.boardTarget?.sessionId && d.boardTarget.expiresAt > Date.now() ? d.boardTarget : null);
         if (d.uploadToken) uploadTokenRef.current = d.uploadToken;
         if (d.fileServerUrls?.length) {
           probeFileServers(d.fileServerUrls);
@@ -945,6 +1027,11 @@ export default function GalleryScreen() {
         return;
       }
       if (msg.type !== 'event') return;
+
+      if (msg.action === 'board_target') {
+        const target = msg.data as BoardTarget;
+        setBoardTarget(target.sessionId && target.expiresAt > Date.now() ? target : null);
+      }
 
       if (msg.action === 'file_server') {
         const d = msg.data as { url?: string; uploadToken?: string };
@@ -1805,6 +1892,9 @@ export default function GalleryScreen() {
         options={[
           { label: '拍照', icon: Camera, onPress: importFromCamera },
           { label: '从相册选', icon: ImageIcon, onPress: importFromGallery },
+          ...(connected && boardTarget && boardTarget.expiresAt > Date.now()
+            ? [{ label: `投到参考板 · ${boardTarget.name}`, icon: Images, onPress: sendToBoardFromGallery }]
+            : []),
         ]}
       />
 
@@ -1813,6 +1903,7 @@ export default function GalleryScreen() {
       {/* Import progress modal */}
       <ImportProgressModal
         state={importState}
+        boardName={boardSendName}
         onDismiss={() => setImportState({ stage: 'idle' })}
       />
 
@@ -2233,10 +2324,12 @@ type ImportStateShape =
   | { stage: 'idle' }
   | { stage: 'uploading'; current: number; total: number; failed: number }
   | { stage: 'importing'; uploaded: number; total: number; progress: number; failed: number }
-  | { stage: 'done'; processed: number; failed: number; total: number };
+  | { stage: 'done'; processed: number; failed: number; total: number }
+  | { stage: 'unknown'; total: number };
 
-function ImportProgressModal({ state, onDismiss }: {
+function ImportProgressModal({ state, boardName, onDismiss }: {
   state: ImportStateShape;
+  boardName?: string;
   onDismiss: () => void;
 }) {
   if (state.stage === 'idle') return null;
@@ -2244,7 +2337,7 @@ function ImportProgressModal({ state, onDismiss }: {
   // result event re-opens the modal at 'done' to report the outcome).
   // 'uploading' stays modal: the local upload loop is still driving state and
   // would immediately re-surface it anyway.
-  const dismissable = state.stage === 'done' || state.stage === 'importing';
+  const dismissable = state.stage === 'done' || state.stage === 'importing' || state.stage === 'unknown';
 
   let title = '';
   let body: React.ReactNode = null;
@@ -2261,13 +2354,20 @@ function ImportProgressModal({ state, onDismiss }: {
       </YStack>
     );
   } else if (state.stage === 'importing') {
-    title = '导入到素材库';
+    title = boardName ? `投到参考板 · ${boardName}` : '导入到素材库';
     body = (
       <YStack alignItems="center" gap={10} paddingVertical={8}>
         <Spinner size="large" color={colors.brand.primary} />
         <Text fontSize={14} color={colors.text.secondary}>{state.progress} / {state.uploaded}</Text>
         <Text fontSize={11} color={colors.text.tertiary}>桌面端正在写入</Text>
       </YStack>
+    );
+  } else if (state.stage === 'unknown') {
+    title = '投图结果待确认';
+    body = (
+      <Text fontSize={14} color={colors.text.secondary}>
+        连接中断，无法确认是否已上板。请在桌面参考板查看后再决定是否重试。
+      </Text>
     );
   } else {
     title = '完成';
@@ -2879,4 +2979,3 @@ function DetailModal({ item, items, getThumb, getFull, onClose, onOpenLightbox,
     </Modal>
   );
 }
-

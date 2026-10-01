@@ -632,6 +632,14 @@ export class RemoteWebSocket {
     }, { queueIfOffline: true });  // survive the picker-backgrounded reconnect
   }
 
+  sendToBoard(urls: string[], sessionId: string, requestId: string): boolean {
+    if (!sessionId || !requestId || urls.length === 0 || !this.desktopOnline) return false;
+    return this.send({
+      type: 'command', action: 'board_send',
+      data: { urls, sessionId, requestId },
+    });
+  }
+
   /**
    * Run WD14 AI auto-tag over the given library item ids on the desktop.
    * Mirrors the desktop 资源库索引 "索引选中" path — writes tags + style + the
